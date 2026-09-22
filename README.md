@@ -1,4 +1,4 @@
-# MultiTaskbar — a full taskbar on every monitor for Windows 11
+# MultiTaskbar - a full taskbar on every monitor for Windows 11
 
 Free and open source. A complete taskbar on your second and third monitor: pinned apps, window
 titles, volume, clock and show desktop.
