@@ -893,7 +893,10 @@ namespace MultiTaskbar
             public bool Matches(string exe, string appId)
             {
                 if (AppId != null) return appId != null && string.Equals(AppId, appId, StringComparison.OrdinalIgnoreCase);
-                return Target != null && exe != null && string.Equals(Target, exe, StringComparison.OrdinalIgnoreCase);
+                if (Target == null || exe == null) return false;
+                if (string.Equals(Target, exe, StringComparison.OrdinalIgnoreCase)) return true;
+                // Elevated processes only give up their name, not their path.
+                return !Path.IsPathRooted(exe) && string.Equals(Path.GetFileName(Target), exe, StringComparison.OrdinalIgnoreCase);
             }
 
             public void Launch()
@@ -1070,6 +1073,10 @@ namespace MultiTaskbar
                 appIdCache[pid] = Native.GetApplicationUserModelId(hp, ref len, id) == 0 ? id.ToString() : null;
                 Native.CloseHandle(hp);
             }
+            // A window of a process running as administrator cannot be opened for its path, but its
+            // name is still readable, which is enough to pair it with a pinned app.
+            if (p == null)
+                try { p = Process.GetProcessById((int)pid).ProcessName + ".exe"; } catch { }
             exeCache[pid] = p;
             return p;
         }
