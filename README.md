@@ -31,6 +31,16 @@ To change that later, right-click an empty spot on a MultiTaskbar bar and toggle
 **Start with Windows**. If you move the exe, run it once from the new place and the startup
 entry follows it.
 
+### Updates
+
+MultiTaskbar asks GitHub once a day whether a newer release exists. When there is one, the
+right-click menu offers **Update to … and restart**; nothing is downloaded or installed until you
+choose it. The download is checked against the SHA-256 published with the release.
+
+The check sends no data beyond the request itself, and **Check for updates automatically** in the
+same menu turns it off. `MultiTaskbar.exe --update` updates the exe in place without any UI, for
+scripted deployments.
+
 Windows SmartScreen may warn about the download because the exe is not code-signed. Choose
 **More info → Run anyway**, or build it yourself (below).
 
@@ -41,7 +51,7 @@ Windows SmartScreen may warn about the download because the exe is not code-sign
 | Click an app | Switch to it, minimize it, or cycle through its windows |
 | Shift+click or middle-click an app | Open a new window |
 | Right-click an app | Window list, new window, close |
-| Right-click an empty spot | Task Manager, Start with Windows, Exit |
+| Right-click an empty spot | Task Manager, Start with Windows, updates, Exit |
 | Click the clock | Date & time settings |
 
 To quit, right-click an empty spot on the bar and choose **Exit MultiTaskbar**.
