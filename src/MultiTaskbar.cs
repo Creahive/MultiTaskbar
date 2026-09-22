@@ -17,21 +17,39 @@ using System.Text.RegularExpressions;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
+[assembly: AssemblyTitle("MultiTaskbar")]
+[assembly: AssemblyProduct("MultiTaskbar")]
+[assembly: AssemblyVersion(MultiTaskbar.Program.Version)]
+[assembly: AssemblyFileVersion(MultiTaskbar.Program.Version)]
+
 namespace MultiTaskbar
 {
     static class Program
     {
+        public const string Version = "1.1.0";
+        public const string Repo = "creahive/MultiTaskbar";
+
         public static BarManager Manager;
         public static string LogPath = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MultiTaskbar", "MultiTaskbar.log");
 
         [STAThread]
-        static void Main()
+        static void Main(string[] args)
         {
+            // Updates the exe in place and exits, for scripted deployments. Bars already running
+            // keep the old build until they are restarted.
+            if (Array.IndexOf(args, "--update") >= 0) { Updater.RunHeadless(); return; }
+
+            bool waitForPrevious = Array.IndexOf(args, "--wait") >= 0;
             bool created;
             using (var mutex = new System.Threading.Mutex(true, "Local\\MultiTaskbar_SingleInstance", out created))
             {
+                // After an update the old copy is still shutting down, so wait for it to let go.
+                if (!created && waitForPrevious)
+                    try { created = mutex.WaitOne(TimeSpan.FromSeconds(20)); }
+                    catch (System.Threading.AbandonedMutexException) { created = true; }
                 if (!created) return;
+                Updater.CleanUp();
                 Native.SetProcessDPIAware();
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
@@ -58,12 +76,252 @@ namespace MultiTaskbar
         }
     }
 
+    // ------------------------------------------------------------------ settings
+
+    static class Settings
+    {
+        public const string Key = @"Software\MultiTaskbar";
+
+        public static object Get(string name)
+        {
+            try { using (var k = Registry.CurrentUser.OpenSubKey(Key)) return k == null ? null : k.GetValue(name); }
+            catch { return null; }
+        }
+
+        public static void Set(string name, object value)
+        {
+            try { using (var k = Registry.CurrentUser.CreateSubKey(Key)) k.SetValue(name, value); }
+            catch (Exception ex) { Program.Log(ex); }
+        }
+
+        public static bool Flag(string name, bool fallback)
+        {
+            object v = Get(name);
+            return v is int ? (int)v != 0 : fallback;
+        }
+    }
+
+    // ------------------------------------------------------------------ updates
+
+    // Asks GitHub once a day for the newest release, and installs it when the user says so.
+    // Nothing but the request itself leaves this machine, and the check can be turned off.
+    static class Updater
+    {
+        const string AutoSetting = "CheckForUpdates";
+        const string LastCheckSetting = "LastUpdateCheck";
+        static readonly object gate = new object();
+        static bool busy;
+
+        public static string NewVersion;   // tag of a newer release, once one is found
+        static string downloadUrl, checksumUrl;
+
+        public static bool AutoCheck
+        {
+            get { return Settings.Flag(AutoSetting, true); }
+            set { Settings.Set(AutoSetting, value ? 1 : 0); }
+        }
+
+        // The previous copy of the exe, left behind by an update because a running file
+        // can be renamed but not deleted.
+        public static void CleanUp()
+        {
+            try
+            {
+                string old = Application.ExecutablePath + ".old";
+                if (File.Exists(old)) File.Delete(old);
+            }
+            catch { }
+        }
+
+        public static void CheckDaily(Control ui)
+        {
+            if (!AutoCheck || NewVersion != null) return;
+            var last = Settings.Get(LastCheckSetting) as string;
+            DateTime when;
+            if (last != null && DateTime.TryParse(last, out when) && (DateTime.UtcNow - when).TotalHours < 24) return;
+            Settings.Set(LastCheckSetting, DateTime.UtcNow.ToString("o"));
+            Check(ui, null);
+        }
+
+        // done(newerTagOrNull, error) runs on the UI thread; pass null to check quietly.
+        public static void Check(Control ui, Action<string, Exception> done)
+        {
+            lock (gate)
+            {
+                if (busy) return;
+                busy = true;
+            }
+            System.Threading.ThreadPool.QueueUserWorkItem(delegate
+            {
+                string tag = null;
+                Exception error = null;
+                try { tag = Fetch(); }
+                catch (Exception ex) { error = ex; Program.Log(ex); }
+                lock (gate) busy = false;
+                string result = tag;
+                try
+                {
+                    if (ui != null && ui.IsHandleCreated)
+                        ui.BeginInvoke(new Action(delegate { if (done != null) done(result, error); }));
+                    else if (done != null) done(result, error);
+                }
+                catch (Exception ex) { Program.Log(ex); }
+            });
+        }
+
+        static string Fetch()
+        {
+            string json = Get("https://api.github.com/repos/" + Program.Repo + "/releases/latest");
+            // The payload is small and comes from a repository we control, so it is read with
+            // patterns rather than pulling in a JSON library.
+            var tagMatch = Regex.Match(json, "\"tag_name\"\\s*:\\s*\"([^\"]+)\"");
+            if (!tagMatch.Success) return null;
+            string tag = tagMatch.Groups[1].Value;
+            Version latest, current = new Version(Program.Version);
+            if (!Version.TryParse(tag.TrimStart('v', 'V'), out latest)) return null;
+            if (latest <= current) return null;
+
+            downloadUrl = checksumUrl = null;
+            foreach (Match m in Regex.Matches(json, "\"browser_download_url\"\\s*:\\s*\"([^\"]+)\""))
+            {
+                string url = m.Groups[1].Value;
+                if (url.EndsWith("MultiTaskbar.exe", StringComparison.OrdinalIgnoreCase)) downloadUrl = url;
+                else if (url.EndsWith("SHA256SUMS.txt", StringComparison.OrdinalIgnoreCase)) checksumUrl = url;
+            }
+            if (downloadUrl == null) return null;
+            NewVersion = tag;
+            return tag;
+        }
+
+        // done(installed, error) runs on the UI thread. On success the app restarts itself.
+        public static void Install(Control ui, Action<bool, Exception> done)
+        {
+            if (downloadUrl == null) return;
+            string url = downloadUrl, sums = checksumUrl;
+            System.Threading.ThreadPool.QueueUserWorkItem(delegate
+            {
+                string temp = null;
+                Exception error = null;
+                try
+                {
+                    temp = Path.Combine(Path.GetTempPath(), "MultiTaskbar.update.exe");
+                    Download(url, temp);
+                    if (sums != null) Verify(temp, Get(sums));
+                }
+                catch (Exception ex) { error = ex; Program.Log(ex); }
+                string file = temp;
+                Exception err = error;
+                try
+                {
+                    ui.BeginInvoke(new Action(delegate
+                    {
+                        if (err != null) { done(false, err); return;  }
+                        try { Swap(file, true); done(true, null); }
+                        catch (Exception ex) { Program.Log(ex); done(false, ex); }
+                    }));
+                }
+                catch (Exception ex) { Program.Log(ex); }
+            });
+        }
+
+        // A running exe cannot be replaced, but it can be renamed out of the way.
+        static void Swap(string newExe, bool restart)
+        {
+            string exe = Application.ExecutablePath, old = exe + ".old";
+            if (File.Exists(old)) File.Delete(old);
+            File.Move(exe, old);
+            try { File.Copy(newExe, exe); }
+            catch { File.Move(old, exe); throw; }
+            try { File.Delete(newExe); } catch { }
+            if (!restart) return;
+            Process.Start(new ProcessStartInfo(exe, "--wait") { UseShellExecute = false });
+            Program.Manager.ExitApp();
+        }
+
+        public static void RunHeadless()
+        {
+            try
+            {
+                CleanUp();
+                string tag = Fetch();
+                if (tag == null) { Note("already at the latest version (" + Program.Version + ")"); return; }
+                string temp = Path.Combine(Path.GetTempPath(), "MultiTaskbar.update.exe");
+                Download(downloadUrl, temp);
+                if (checksumUrl != null) Verify(temp, Get(checksumUrl));
+                Swap(temp, false);
+                Note("updated to " + tag);
+            }
+            catch (Exception ex) { Program.Log(ex); }
+        }
+
+        static void Note(string what)
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(Program.LogPath));
+                File.AppendAllText(Program.LogPath, DateTime.Now + "  update: " + what + Environment.NewLine);
+            }
+            catch { }
+        }
+
+        static void Verify(string file, string sums)
+        {
+            string actual;
+            using (var sha = System.Security.Cryptography.SHA256.Create())
+            using (var s = File.OpenRead(file))
+                actual = BitConverter.ToString(sha.ComputeHash(s)).Replace("-", "");
+            foreach (var line in sums.Split('\n'))
+            {
+                if (line.IndexOf("MultiTaskbar.exe", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                string expected = line.Trim().Split(' ')[0];
+                if (string.Equals(expected, actual, StringComparison.OrdinalIgnoreCase)) return;
+                throw new InvalidDataException("The downloaded file does not match its published checksum.");
+            }
+            throw new InvalidDataException("The release has no checksum for MultiTaskbar.exe.");
+        }
+
+        static void Prepare()
+        {
+            // .NET Framework 4 still defaults to older, refused protocols.
+            try { System.Net.ServicePointManager.SecurityProtocol |= (System.Net.SecurityProtocolType)3072; }
+            catch { }
+        }
+
+        static string Get(string url)
+        {
+            Prepare();
+            var req = Request(url);
+            using (var resp = req.GetResponse())
+            using (var r = new StreamReader(resp.GetResponseStream()))
+                return r.ReadToEnd();
+        }
+
+        static void Download(string url, string path)
+        {
+            Prepare();
+            var req = Request(url);
+            using (var resp = req.GetResponse())
+            using (var src = resp.GetResponseStream())
+            using (var dst = File.Create(path))
+                src.CopyTo(dst);
+        }
+
+        static System.Net.HttpWebRequest Request(string url)
+        {
+            var req = (System.Net.HttpWebRequest)System.Net.WebRequest.Create(url);
+            req.UserAgent = "MultiTaskbar/" + Program.Version;   // GitHub refuses requests without one
+            req.Timeout = 20000;
+            req.ReadWriteTimeout = 60000;
+            return req;
+        }
+    }
+
     // ------------------------------------------------------------------ start with Windows
 
     static class Autostart
     {
         const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
-        const string SettingsKey = @"Software\MultiTaskbar";
+        const string SettingsKey = Settings.Key;
         const string Name = "MultiTaskbar";
 
         static string Command { get { return "\"" + Application.ExecutablePath + "\""; } }
@@ -128,7 +386,11 @@ namespace MultiTaskbar
     {
         readonly List<Bar> bars = new List<Bar>();
         readonly Timer hideTimer = new Timer();
+        readonly Timer updateTimer = new Timer();
+        readonly Form sync = new Form();   // never shown; owns the thread that background work returns to
         bool restored;
+
+        public Control Sync { get { return sync; } }
 
         public BarManager()
         {
@@ -144,6 +406,14 @@ namespace MultiTaskbar
             var ask = new Timer { Interval = 1000 };
             ask.Tick += delegate { ask.Stop(); ask.Dispose(); Autostart.AskOnFirstRun(); };
             ask.Start();
+
+            if (!sync.IsHandleCreated) { var h = sync.Handle; }
+            updateTimer.Interval = 1000 * 60 * 60;   // the check itself is limited to once a day
+            updateTimer.Tick += delegate { Updater.CheckDaily(sync); };
+            updateTimer.Start();
+            var firstCheck = new Timer { Interval = 60000 };
+            firstCheck.Tick += delegate { firstCheck.Stop(); firstCheck.Dispose(); Updater.CheckDaily(sync); };
+            firstCheck.Start();
         }
 
         void OnDisplayChanged(object sender, EventArgs e)
@@ -178,6 +448,7 @@ namespace MultiTaskbar
             if (restored) return;
             restored = true;
             hideTimer.Stop();
+            updateTimer.Stop();
             foreach (var h in Native.FindTopWindows("Shell_SecondaryTrayWnd"))
                 Native.ShowWindow(h, Native.SW_SHOWNOACTIVATE);
         }
@@ -750,8 +1021,61 @@ namespace MultiTaskbar
                 try { Autostart.Enabled = !auto.Checked; } catch (Exception ex) { Program.Log(ex); }
             };
             m.Items.Add(auto);
+            AddUpdateItems(m);
             m.Items.Add("Taskbar settings", null, delegate { Launch("ms-settings:taskbar", null); });
             m.Items.Add("Exit MultiTaskbar", null, delegate { Program.Manager.ExitApp(); });
+        }
+
+        void AddUpdateItems(ContextMenuStrip m)
+        {
+            if (Updater.NewVersion != null)
+            {
+                var install = new ToolStripMenuItem("Update to " + Updater.NewVersion + " and restart");
+                install.Font = new Font(install.Font, FontStyle.Bold);
+                install.Click += delegate { InstallUpdate(); };
+                m.Items.Add(install);
+            }
+            else
+            {
+                m.Items.Add("Check for updates", null, delegate { CheckForUpdates(); });
+            }
+            var autoCheck = new ToolStripMenuItem("Check for updates automatically") { Checked = Updater.AutoCheck };
+            autoCheck.Click += delegate { Updater.AutoCheck = !autoCheck.Checked; };
+            m.Items.Add(autoCheck);
+        }
+
+        void CheckForUpdates()
+        {
+            Updater.Check(this, delegate(string tag, Exception error)
+            {
+                if (error != null)
+                    Msg("Could not reach GitHub to check for updates.\n\n" + error.Message, MessageBoxIcon.Warning);
+                else if (tag == null)
+                    Msg("MultiTaskbar " + Program.Version + " is the latest version.", MessageBoxIcon.Information);
+                else if (Ask("MultiTaskbar " + tag + " is available. You have " + Program.Version + ".\n\n" +
+                             "Download it and restart now?"))
+                    InstallUpdate();
+            });
+        }
+
+        void InstallUpdate()
+        {
+            Updater.Install(this, delegate(bool ok, Exception error)
+            {
+                if (!ok) Msg("The update could not be installed.\n\n" + error.Message, MessageBoxIcon.Warning);
+            });
+        }
+
+        void Msg(string text, MessageBoxIcon icon)
+        {
+            Native.SetForegroundWindow(Handle);
+            MessageBox.Show(this, text, "MultiTaskbar", MessageBoxButtons.OK, icon);
+        }
+
+        bool Ask(string text)
+        {
+            Native.SetForegroundWindow(Handle);
+            return MessageBox.Show(this, text, "MultiTaskbar", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes;
         }
 
         void ShowMenu(ContextMenuStrip m, Point at)
