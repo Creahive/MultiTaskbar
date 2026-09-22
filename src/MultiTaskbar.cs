@@ -26,7 +26,7 @@ namespace MultiTaskbar
 {
     static class Program
     {
-        public const string Version = "1.1.0";
+        public const string Version = "1.2.0";
         public const string Repo = "creahive/MultiTaskbar";
 
         public static BarManager Manager;
@@ -492,6 +492,7 @@ namespace MultiTaskbar
         IntPtr lastFg;
         bool hiddenForFullscreen;
         VolumePopup volPopup;
+        ShellMenu shellMenu;
 
         public Bar(Screen s)
         {
@@ -978,70 +979,158 @@ namespace MultiTaskbar
             Native.SetForegroundWindow(volPopup.Handle);
         }
 
+        // Menus are built as plain Windows menus rather than WinForms ones, because that is the only
+        // way to show the shell's own entries for an app (Run as administrator, Properties, Unpin)
+        // in the same menu as ours.
+        const int ID_WINDOW_FIRST = 1, ID_WINDOW_LAST = 0x0FFF;
+        const int ID_RECENT_FIRST = 0x8100, ID_RECENT_LAST = 0x81FF;
+        const int ID_OPEN_NEW = 0x9001, ID_CLOSE = 0x9002, ID_TASKMGR = 0x9010, ID_AUTOSTART = 0x9011,
+                  ID_UPDATE = 0x9012, ID_AUTOUPDATE = 0x9013, ID_SETTINGS = 0x9014, ID_EXIT = 0x9015;
+        List<Recent.Entry> recent = new List<Recent.Entry>();
+
         void ShowAppMenu(Item it, Point at)
         {
-            var m = new ContextMenuStrip();
-            foreach (var w in it.Windows)
+            IntPtr menu = Native.CreatePopupMenu();
+            try
             {
-                var hw = w;
-                string t = WindowScanner.Title(hw);
-                if (t.Length > 60) t = t.Substring(0, 57) + "...";
-                m.Items.Add(t, null, delegate { Native.Activate(hw); });
-            }
-            if (it.Windows.Count > 0) m.Items.Add(new ToolStripSeparator());
-            string name = it.Pin != null ? it.Pin.Name : (it.Exe != null ? Path.GetFileNameWithoutExtension(it.Exe) : "app");
-            m.Items.Add("Open new " + name, null, delegate { LaunchNew(it); });
-            if (it.Windows.Count > 0)
-            {
-                var ws = new List<IntPtr>(it.Windows);
-                m.Items.Add(ws.Count > 1 ? "Close all windows" : "Close window", null, delegate
+                recent = Recent.For(Recent.AppIdOf(ShellTarget(it), it.Windows.Count > 0 ? it.Windows[0] : IntPtr.Zero));
+                if (recent.Count > 0)
                 {
-                    foreach (var w in ws) Native.PostMessage(w, 0x0010 /*WM_CLOSE*/, IntPtr.Zero, IntPtr.Zero);
-                });
+                    Native.AppendMenu(menu, Native.MF_STRING | Native.MF_GRAYED, IntPtr.Zero, "Recent");
+                    for (int i = 0; i < recent.Count && i <= ID_RECENT_LAST - ID_RECENT_FIRST; i++)
+                    {
+                        string n = recent[i].Name;
+                        if (n.Length > 60) n = n.Substring(0, 57) + "...";
+                        Native.AppendMenu(menu, Native.MF_STRING, new IntPtr(ID_RECENT_FIRST + i), "   " + n);
+                    }
+                    Separator(menu);
+                }
+
+                for (int i = 0; i < it.Windows.Count && i < ID_WINDOW_LAST; i++)
+                {
+                    string t = WindowScanner.Title(it.Windows[i]);
+                    if (t.Length > 60) t = t.Substring(0, 57) + "...";
+                    Native.AppendMenu(menu, Native.MF_STRING, new IntPtr(ID_WINDOW_FIRST + i), t);
+                }
+                Separator(menu);
+
+                using (var shell = ShellMenu.For(ShellTarget(it), menu, Handle))
+                {
+                    if (shell == null)
+                    {
+                        string name = it.Pin != null ? it.Pin.Name
+                            : (it.Exe != null ? Path.GetFileNameWithoutExtension(it.Exe) : "app");
+                        Native.AppendMenu(menu, Native.MF_STRING, new IntPtr(ID_OPEN_NEW), "Open new " + name);
+                    }
+                    if (it.Windows.Count > 0)
+                    {
+                        Separator(menu);
+                        Native.AppendMenu(menu, Native.MF_STRING, new IntPtr(ID_CLOSE),
+                            it.Windows.Count > 1 ? "Close all windows" : "Close window");
+                    }
+                    Separator(menu);
+                    AddBarItems(menu);
+                    shellMenu = shell;
+                    int id = Track(menu, at);
+                    shellMenu = null;
+                    if (shell != null && shell.Handles(id)) shell.Invoke(id, Handle);
+                    else Dispatch(id, it);
+                }
             }
-            m.Items.Add(new ToolStripSeparator());
-            AddBarItems(m);
-            ShowMenu(m, at);
+            finally { Native.DestroyMenu(menu); }
         }
 
         void ShowBarMenu(Point at)
         {
-            var m = new ContextMenuStrip();
-            m.Items.Add("Task Manager", null, delegate { Launch("taskmgr.exe", null); });
-            m.Items.Add(new ToolStripSeparator());
-            AddBarItems(m);
-            ShowMenu(m, at);
-        }
-
-        void AddBarItems(ContextMenuStrip m)
-        {
-            var auto = new ToolStripMenuItem("Start with Windows") { Checked = Autostart.Enabled };
-            auto.Click += delegate
+            IntPtr menu = Native.CreatePopupMenu();
+            try
             {
-                try { Autostart.Enabled = !auto.Checked; } catch (Exception ex) { Program.Log(ex); }
-            };
-            m.Items.Add(auto);
-            AddUpdateItems(m);
-            m.Items.Add("Taskbar settings", null, delegate { Launch("ms-settings:taskbar", null); });
-            m.Items.Add("Exit MultiTaskbar", null, delegate { Program.Manager.ExitApp(); });
+                Native.AppendMenu(menu, Native.MF_STRING, new IntPtr(ID_TASKMGR), "Task Manager");
+                Separator(menu);
+                AddBarItems(menu);
+                Dispatch(Track(menu, at), null);
+            }
+            finally { Native.DestroyMenu(menu); }
         }
 
-        void AddUpdateItems(ContextMenuStrip m)
+        static void Separator(IntPtr menu)
         {
+            if (Native.GetMenuItemCount(menu) > 0) Native.AppendMenu(menu, Native.MF_SEPARATOR, IntPtr.Zero, null);
+        }
+
+        void AddBarItems(IntPtr menu)
+        {
+            Native.AppendMenu(menu, Native.MF_STRING | (Autostart.Enabled ? Native.MF_CHECKED : 0),
+                new IntPtr(ID_AUTOSTART), "Start with Windows");
             if (Updater.NewVersion != null)
             {
-                var install = new ToolStripMenuItem("Update to " + Updater.NewVersion + " and restart");
-                install.Font = new Font(install.Font, FontStyle.Bold);
-                install.Click += delegate { InstallUpdate(); };
-                m.Items.Add(install);
+                Native.AppendMenu(menu, Native.MF_STRING, new IntPtr(ID_UPDATE),
+                    "Update to " + Updater.NewVersion + " and restart");
+                Native.SetMenuDefaultItem(menu, (uint)ID_UPDATE, false);
             }
-            else
+            else Native.AppendMenu(menu, Native.MF_STRING, new IntPtr(ID_UPDATE), "Check for updates");
+            Native.AppendMenu(menu, Native.MF_STRING | (Updater.AutoCheck ? Native.MF_CHECKED : 0),
+                new IntPtr(ID_AUTOUPDATE), "Check for updates automatically");
+            Native.AppendMenu(menu, Native.MF_STRING, new IntPtr(ID_SETTINGS), "Taskbar settings");
+            Native.AppendMenu(menu, Native.MF_STRING, new IntPtr(ID_EXIT), "Exit MultiTaskbar");
+        }
+
+        int Track(IntPtr menu, Point at)
+        {
+            var pt = PointToScreen(at);
+            Native.SetForegroundWindow(Handle);
+            int id = Native.TrackPopupMenuEx(menu,
+                Native.TPM_RETURNCMD | Native.TPM_RIGHTBUTTON | Native.TPM_BOTTOMALIGN,
+                pt.X, Top, Handle, IntPtr.Zero);
+            Native.PostMessage(Handle, 0, IntPtr.Zero, IntPtr.Zero);   // lets the menu close cleanly
+            return id;
+        }
+
+        void Dispatch(int id, Item it)
+        {
+            if (id <= 0) return;
+            if (it != null && id >= ID_WINDOW_FIRST && id - ID_WINDOW_FIRST < it.Windows.Count)
             {
-                m.Items.Add("Check for updates", null, delegate { CheckForUpdates(); });
+                Native.Activate(it.Windows[id - ID_WINDOW_FIRST]);
+                return;
             }
-            var autoCheck = new ToolStripMenuItem("Check for updates automatically") { Checked = Updater.AutoCheck };
-            autoCheck.Click += delegate { Updater.AutoCheck = !autoCheck.Checked; };
-            m.Items.Add(autoCheck);
+            if (id >= ID_RECENT_FIRST && id - ID_RECENT_FIRST < recent.Count)
+            {
+                Launch(recent[id - ID_RECENT_FIRST].Path, null);
+                return;
+            }
+            switch (id)
+            {
+                case ID_OPEN_NEW: LaunchNew(it); break;
+                case ID_CLOSE:
+                    foreach (var w in new List<IntPtr>(it.Windows))
+                        Native.PostMessage(w, 0x0010 /*WM_CLOSE*/, IntPtr.Zero, IntPtr.Zero);
+                    break;
+                case ID_TASKMGR: Launch("taskmgr.exe", null); break;
+                case ID_AUTOSTART:
+                    try { Autostart.Enabled = !Autostart.Enabled; } catch (Exception ex) { Program.Log(ex); }
+                    break;
+                case ID_UPDATE:
+                    if (Updater.NewVersion != null) InstallUpdate(); else CheckForUpdates();
+                    break;
+                case ID_AUTOUPDATE: Updater.AutoCheck = !Updater.AutoCheck; break;
+                case ID_SETTINGS: Launch("ms-settings:taskbar", null); break;
+                case ID_EXIT: Program.Manager.ExitApp(); break;
+            }
+        }
+
+        static string ShellTarget(Item it)
+        {
+            if (it.Pin != null)
+                return it.Pin.AppId != null ? "shell:AppsFolder\\" + it.Pin.AppId : it.Pin.LinkPath;
+            return it.Exe != null && Path.IsPathRooted(it.Exe) && File.Exists(it.Exe) ? it.Exe : null;
+        }
+
+        // Owner-drawn entries added by shell extensions need these messages forwarded to them.
+        protected override void WndProc(ref Message m)
+        {
+            if (shellMenu != null && shellMenu.HandleMessage(ref m)) return;
+            base.WndProc(ref m);
         }
 
         void CheckForUpdates()
@@ -1076,13 +1165,6 @@ namespace MultiTaskbar
         {
             Native.SetForegroundWindow(Handle);
             return MessageBox.Show(this, text, "MultiTaskbar", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes;
-        }
-
-        void ShowMenu(ContextMenuStrip m, Point at)
-        {
-            m.Closed += delegate { BeginInvoke(new Action(m.Dispose)); };
-            Native.SetForegroundWindow(Handle);
-            m.Show(this, at, ToolStripDropDownDirection.AboveRight);
         }
 
         protected override void Dispose(bool disposing)
@@ -1492,6 +1574,257 @@ namespace MultiTaskbar
         }
     }
 
+    // ------------------------------------------------------------------ recent documents
+
+    // The files an app opened lately, the same list the real taskbar shows. Windows keeps it per
+    // app id, and hands it over through the shell's own document-list object, so nothing here
+    // parses the jump list files by hand. Empty when the user has turned off
+    // "Show recently opened items in Start, Jump Lists and File Explorer".
+    static class Recent
+    {
+        [ComImport, Guid("3c594f9f-9f30-47a1-979a-c9e83d3d0a06"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        interface IApplicationDocumentLists
+        {
+            [PreserveSig] int SetAppID([MarshalAs(UnmanagedType.LPWStr)] string appId);
+            [PreserveSig] int GetList(int listType, uint count, ref Guid riid, out IntPtr ppv);
+        }
+
+        [ComImport, Guid("92ca9dcd-5622-4bba-a805-5e9f541bd8c9"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        interface IObjectArray
+        {
+            [PreserveSig] int GetCount(out uint count);
+            [PreserveSig] int GetAt(uint index, ref Guid riid, out IntPtr ppv);
+        }
+
+        [ComImport, Guid("886d8eeb-8cf2-4446-8d02-cdba1dbdcf99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        interface IPropertyStore
+        {
+            [PreserveSig] int GetCount(out uint count);
+            [PreserveSig] int GetAt(uint index, out Native.PROPERTYKEY key);
+            [PreserveSig] int GetValue(ref Native.PROPERTYKEY key, out Native.PROPVARIANT value);
+            [PreserveSig] int SetValue(ref Native.PROPERTYKEY key, ref Native.PROPVARIANT value);
+            [PreserveSig] int Commit();
+        }
+
+        [DllImport("ole32.dll")]
+        static extern int CoCreateInstance(ref Guid clsid, IntPtr outer, uint ctx, ref Guid iid,
+            [MarshalAs(UnmanagedType.Interface)] out object obj);
+        [DllImport("shell32.dll")]
+        static extern int SHGetPropertyStoreForWindow(IntPtr hwnd, ref Guid iid,
+            [MarshalAs(UnmanagedType.Interface)] out object store);
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+        static extern int SHGetPropertyStoreFromParsingName(string path, IntPtr bind, int flags, ref Guid iid,
+            [MarshalAs(UnmanagedType.Interface)] out object store);
+        [DllImport("propsys.dll")]
+        static extern int PropVariantToStringAlloc(ref Native.PROPVARIANT value, out IntPtr str);
+        [DllImport("ole32.dll")]
+        static extern int PropVariantClear(ref Native.PROPVARIANT value);
+
+        public class Entry
+        {
+            public string Name, Path;
+        }
+
+        public static bool Enabled
+        {
+            get
+            {
+                try
+                {
+                    using (var k = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"))
+                        return k == null || Convert.ToInt32(k.GetValue("Start_TrackDocs", 1)) != 0;
+                }
+                catch { return true; }
+            }
+        }
+
+        public static List<Entry> For(string appId)
+        {
+            var list = new List<Entry>();
+            if (string.IsNullOrEmpty(appId) || !Enabled) return list;
+            try
+            {
+                var clsid = new Guid("86bec222-30f2-47e0-9f25-60d11cd75c28"); // CLSID_ApplicationDocumentLists
+                var iid = typeof(IApplicationDocumentLists).GUID;
+                object o;
+                if (CoCreateInstance(ref clsid, IntPtr.Zero, 1 /*CLSCTX_INPROC_SERVER*/, ref iid, out o) != 0) return list;
+                var lists = (IApplicationDocumentLists)o;
+                try
+                {
+                    if (lists.SetAppID(appId) != 0) return list;
+                    var arrayIid = typeof(IObjectArray).GUID;
+                    IntPtr ptr;
+                    if (lists.GetList(0 /*ADLT_RECENT*/, 10, ref arrayIid, out ptr) != 0 || ptr == IntPtr.Zero) return list;
+                    var arr = (IObjectArray)Marshal.GetObjectForIUnknown(ptr);
+                    Marshal.Release(ptr);
+                    try
+                    {
+                        uint count;
+                        arr.GetCount(out count);
+                        var itemIid = new Guid("43826d1e-e718-42ee-bc55-a1e261c37bfe"); // IShellItem
+                        for (uint i = 0; i < count; i++)
+                        {
+                            IntPtr ip;
+                            if (arr.GetAt(i, ref itemIid, out ip) != 0 || ip == IntPtr.Zero) continue;
+                            var item = (ShellIcons.IShellItem)Marshal.GetObjectForIUnknown(ip);
+                            Marshal.Release(ip);
+                            try
+                            {
+                                var e = new Entry { Name = Name(item, 0 /*SIGDN_NORMALDISPLAY*/), Path = Name(item, unchecked((uint)0x80058000) /*SIGDN_DESKTOPABSOLUTEPARSING*/) };
+                                if (e.Name != null && e.Path != null) list.Add(e);
+                            }
+                            finally { Marshal.ReleaseComObject(item); }
+                        }
+                    }
+                    finally { Marshal.ReleaseComObject(arr); }
+                }
+                finally { Marshal.ReleaseComObject(lists); }
+            }
+            catch (Exception ex) { Program.Log(ex); }
+            return list;
+        }
+
+        static string Name(ShellIcons.IShellItem item, uint kind)
+        {
+            IntPtr p;
+            if (item.GetDisplayName(kind, out p) != 0 || p == IntPtr.Zero) return null;
+            string s = Marshal.PtrToStringUni(p);
+            Marshal.FreeCoTaskMem(p);
+            return s;
+        }
+
+        // The id Windows files an app's documents under: the one the app declares for itself, or
+        // the one its window carries.
+        public static string AppIdOf(string linkOrExe, IntPtr window)
+        {
+            string id = FromStore(delegate(ref Guid iid, out object store)
+            {
+                store = null;
+                if (string.IsNullOrEmpty(linkOrExe)) return unchecked((int)0x80004005);
+                return SHGetPropertyStoreFromParsingName(linkOrExe, IntPtr.Zero, 0 /*GPS_DEFAULT*/, ref iid, out store);
+            });
+            if (id == null && window != IntPtr.Zero)
+                id = FromStore(delegate(ref Guid iid, out object store) { return SHGetPropertyStoreForWindow(window, ref iid, out store); });
+            return id;
+        }
+
+        delegate int OpenStore(ref Guid iid, out object store);
+
+        static string FromStore(OpenStore open)
+        {
+            try
+            {
+                var iid = typeof(IPropertyStore).GUID;
+                object o = null;
+                if (open(ref iid, out o) != 0 || o == null) return null;
+                var store = (IPropertyStore)o;
+                try
+                {
+                    // PKEY_AppUserModel_ID
+                    var key = new Native.PROPERTYKEY { fmtid = new Guid("9f4c2855-9f79-4b39-a8d0-e1d42de1d5f3"), pid = 5 };
+                    Native.PROPVARIANT v;
+                    if (store.GetValue(ref key, out v) != 0) return null;
+                    try
+                    {
+                        IntPtr str;
+                        if (PropVariantToStringAlloc(ref v, out str) != 0 || str == IntPtr.Zero) return null;
+                        string s = Marshal.PtrToStringUni(str);
+                        Marshal.FreeCoTaskMem(str);
+                        return string.IsNullOrEmpty(s) ? null : s;
+                    }
+                    finally { PropVariantClear(ref v); }
+                }
+                finally { Marshal.ReleaseComObject(store); }
+            }
+            catch (Exception ex) { Program.Log(ex); return null; }
+        }
+    }
+
+    // ------------------------------------------------------------------ shell context menu
+
+    // Borrows the menu Explorer shows for a file, a shortcut or an installed app, and merges its
+    // entries into a menu of ours. Entries it owns answer to ids in its own range.
+    class ShellMenu : IDisposable
+    {
+        const uint First = 0x1000, Last = 0x6FFF;
+
+        [ComImport, Guid("000214e4-0000-0000-c000-000000000046"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        interface IContextMenu
+        {
+            [PreserveSig] int QueryContextMenu(IntPtr hmenu, uint index, uint idFirst, uint idLast, uint flags);
+            [PreserveSig] int InvokeCommand(ref Native.CMINVOKECOMMANDINFO ici);
+            [PreserveSig] int GetCommandString(UIntPtr id, uint type, IntPtr reserved, IntPtr name, uint max);
+        }
+
+        [ComImport, Guid("000214f4-0000-0000-c000-000000000046"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        interface IContextMenu2
+        {
+            [PreserveSig] int QueryContextMenu(IntPtr hmenu, uint index, uint idFirst, uint idLast, uint flags);
+            [PreserveSig] int InvokeCommand(ref Native.CMINVOKECOMMANDINFO ici);
+            [PreserveSig] int GetCommandString(UIntPtr id, uint type, IntPtr reserved, IntPtr name, uint max);
+            [PreserveSig] int HandleMenuMsg(uint msg, IntPtr wParam, IntPtr lParam);
+        }
+
+        IContextMenu menu;
+        IContextMenu2 menu2;
+
+        public static ShellMenu For(string parsingName, IntPtr hmenu, IntPtr owner)
+        {
+            if (string.IsNullOrEmpty(parsingName)) return null;
+            try
+            {
+                var item = ShellIcons.Item(parsingName);
+                if (item == null) return null;
+                Guid bhid = new Guid("3981e225-f559-11d3-8e3a-00c04f6837d5"); // BHID_SFUIObject
+                Guid iid = typeof(IContextMenu).GUID;
+                IntPtr ptr;
+                item.BindToHandler(IntPtr.Zero, ref bhid, ref iid, out ptr);
+                Marshal.ReleaseComObject(item);
+                if (ptr == IntPtr.Zero) return null;
+                var m = new ShellMenu { menu = (IContextMenu)Marshal.GetObjectForIUnknown(ptr) };
+                Marshal.Release(ptr);
+                m.menu2 = m.menu as IContextMenu2;
+                uint index = (uint)Native.GetMenuItemCount(hmenu);
+                if (m.menu.QueryContextMenu(hmenu, index, First, Last, 0 /*CMF_NORMAL*/) < 0) { m.Dispose(); return null; }
+                return m;
+            }
+            catch (Exception ex) { Program.Log(ex); return null; }
+        }
+
+        public bool Handles(int id) { return id >= First && id <= Last; }
+
+        public void Invoke(int id, IntPtr owner)
+        {
+            try
+            {
+                var ici = new Native.CMINVOKECOMMANDINFO
+                {
+                    cbSize = Marshal.SizeOf(typeof(Native.CMINVOKECOMMANDINFO)),
+                    hwnd = owner,
+                    lpVerb = new IntPtr(id - First),
+                    nShow = Native.SW_SHOWNORMAL,
+                };
+                menu.InvokeCommand(ref ici);
+            }
+            catch (Exception ex) { Program.Log(ex); }
+        }
+
+        public bool HandleMessage(ref Message m)
+        {
+            if (menu2 == null) return false;
+            if (m.Msg != 0x0117 /*WM_INITMENUPOPUP*/ && m.Msg != 0x002C /*WM_MEASUREITEM*/ && m.Msg != 0x002B /*WM_DRAWITEM*/)
+                return false;
+            try { return menu2.HandleMenuMsg((uint)m.Msg, m.WParam, m.LParam) == 0; }
+            catch { return false; }
+        }
+
+        public void Dispose()
+        {
+            try { if (menu != null) Marshal.ReleaseComObject(menu); } catch { }
+            menu = null; menu2 = null;
+        }
+    }
+
     static class ShellIcons
     {
         [ComImport, Guid("bcc18b79-ba16-442f-80c4-8a59c30c463b"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
@@ -1501,7 +1834,7 @@ namespace MultiTaskbar
         }
 
         [ComImport, Guid("43826d1e-e718-42ee-bc55-a1e261c37bfe"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        interface IShellItem
+        internal interface IShellItem
         {
             void BindToHandler(IntPtr pbc, ref Guid bhid, ref Guid riid, out IntPtr ppv);
             void GetParent(out IShellItem ppsi);
@@ -1515,6 +1848,12 @@ namespace MultiTaskbar
         {
             object o;
             return SHCreateItemFromParsingName(parsing, IntPtr.Zero, ref iid, out o) == 0 ? o : null;
+        }
+
+        public static IShellItem Item(string parsing)
+        {
+            try { return Create(parsing, typeof(IShellItem).GUID) as IShellItem; }
+            catch (Exception ex) { Program.Log(ex); return null; }
         }
 
         public static string DisplayName(string parsing)
@@ -1765,7 +2104,15 @@ namespace MultiTaskbar
 
     static class Native
     {
-        public const int SW_HIDE = 0, SW_MINIMIZE = 6, SW_SHOWNOACTIVATE = 4, SW_RESTORE = 9;
+        public const int SW_HIDE = 0, SW_MINIMIZE = 6, SW_SHOWNOACTIVATE = 4, SW_RESTORE = 9, SW_SHOWNORMAL = 1;
+        public const uint MF_STRING = 0, MF_SEPARATOR = 0x800, MF_CHECKED = 8, MF_GRAYED = 1;
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct PROPERTYKEY { public Guid fmtid; public int pid; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct PROPVARIANT { public ushort vt; ushort r1, r2, r3; public IntPtr p, p2; }
+        public const uint TPM_RETURNCMD = 0x100, TPM_RIGHTBUTTON = 2, TPM_BOTTOMALIGN = 0x20;
         public const int GWL_EXSTYLE = -20;
         public const int WS_EX_TOPMOST = 0x8, WS_EX_TOOLWINDOW = 0x80, WS_EX_APPWINDOW = 0x40000, WS_EX_NOACTIVATE = 0x08000000;
         public const uint GW_OWNER = 4;
@@ -1791,6 +2138,22 @@ namespace MultiTaskbar
             public IntPtr dshSection;
             public uint dsOffset;
         }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct CMINVOKECOMMANDINFO
+        {
+            public int cbSize, fMask;
+            public IntPtr hwnd, lpVerb, lpParameters, lpDirectory;
+            public int nShow, dwHotKey;
+            public IntPtr hIcon;
+        }
+
+        [DllImport("user32.dll")] public static extern IntPtr CreatePopupMenu();
+        [DllImport("user32.dll")] public static extern bool DestroyMenu(IntPtr h);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern bool AppendMenu(IntPtr h, uint flags, IntPtr id, string text);
+        [DllImport("user32.dll")] public static extern int GetMenuItemCount(IntPtr h);
+        [DllImport("user32.dll")] public static extern bool SetMenuDefaultItem(IntPtr h, uint item, bool byPosition);
+        [DllImport("user32.dll")] public static extern int TrackPopupMenuEx(IntPtr h, uint flags, int x, int y, IntPtr owner, IntPtr parms);
 
         public delegate bool EnumWindowsProc(IntPtr h, IntPtr l);
 

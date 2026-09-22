@@ -13,6 +13,8 @@ secondary taskbars with a complete one:
 - **Only the windows on that monitor**, so a window never shows up on every bar
 - **Window titles**, following Windows' "Combine taskbar buttons and hide labels" setting
   (icons only when set to *Always*)
+- **The right-click menu of the real taskbar**: the files the app opened lately, its windows, and
+  Explorer's own entries, including *Run as administrator*, *Properties* and *Unpin from taskbar*
 - **Volume**: click for a slider, scroll to change, middle-click to mute
 - **Clock and date**, and **Show desktop** in the far-right corner
 - Light and dark theme and your accent color, picked up from Windows
@@ -50,7 +52,7 @@ Windows SmartScreen may warn about the download because the exe is not code-sign
 | --- | --- |
 | Click an app | Switch to it, minimize it, or cycle through its windows |
 | Shift+click or middle-click an app | Open a new window |
-| Right-click an app | Window list, new window, close |
+| Right-click an app | Recent files, window list, the shell's own menu (Run as administrator, Properties, Unpin), close |
 | Right-click an empty spot | Task Manager, Start with Windows, updates, Exit |
 | Click the clock | Date & time settings |
 
