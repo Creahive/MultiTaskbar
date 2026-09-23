@@ -7,7 +7,7 @@ Windows 11 gives secondary monitors a stripped-down taskbar: no system tray, no 
 pinned apps only if you also let every monitor show every open window. MultiTaskbar replaces those
 secondary taskbars with a complete one:
 
-![MultiTaskbar on a secondary monitor](docs/screenshot.png)
+![MultiTaskbar on a three-monitor desk](docs/monitors.png)
 
 - **Start button** and your **pinned apps**, in the same order as your main taskbar
 - **Only the windows on that monitor**, so a window never shows up on every bar
