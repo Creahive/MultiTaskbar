@@ -27,7 +27,7 @@ namespace MultiTaskbar
     static class Program
     {
         public const string Version = "1.2.0";
-        public const string Repo = "creahive/MultiTaskbar";
+        public const string Repo = "Creahive/MultiTaskbar";
 
         public static BarManager Manager;
         public static string LogPath = Path.Combine(
