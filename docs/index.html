@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MultiTaskbar — a full taskbar on every monitor for Windows 11</title>
+<meta name="description" content="Free, open-source taskbar for secondary monitors on Windows 11: pinned apps, window previews, volume, a clock with a calendar and show desktop. A single portable exe.">
+<link rel="icon" href="icon.png" type="image/png">
+<meta property="og:title" content="MultiTaskbar — a full taskbar on every monitor for Windows 11">
+<meta property="og:description" content="Windows 11 gives secondary monitors a reduced taskbar. MultiTaskbar replaces it with a complete one. Free and open source.">
+<meta property="og:image" content="https://creahive.github.io/MultiTaskbar/social-preview.png">
+<meta property="og:url" content="https://creahive.github.io/MultiTaskbar/">
+<meta name="twitter:card" content="summary_large_image">
+<style>
+  :root {
+    --bg: #16181c;
+    --panel: #1e2126;
+    --line: #2c3037;
+    --text: #e8eaee;
+    --muted: #9aa1ad;
+    --accent: #3b9dff;
+    --radius: 12px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.65 "Segoe UI", system-ui, -apple-system, sans-serif;
+  }
+  a { color: var(--accent); }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 0 20px; }
+  header { padding: 72px 0 40px; text-align: center; }
+  h1 { font-size: clamp(2.2rem, 6vw, 3.4rem); margin: 0 0 12px; letter-spacing: -0.02em; }
+  .tagline { font-size: clamp(1.05rem, 2.6vw, 1.3rem); color: var(--muted); margin: 0 auto 28px; max-width: 640px; }
+  .buttons { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+  .btn {
+    display: inline-block; padding: 13px 26px; border-radius: 8px; text-decoration: none;
+    font-weight: 600; border: 1px solid var(--line);
+  }
+  .btn.primary { background: #0078d4; border-color: #0078d4; color: #fff; }
+  .btn.primary:hover { background: #1a88de; }
+  .btn.ghost { color: var(--text); }
+  .btn.ghost:hover { border-color: var(--muted); }
+  .note { color: var(--muted); font-size: 0.9rem; margin-top: 14px; }
+  figure { margin: 48px 0; }
+  figure img { width: 100%; border: 1px solid var(--line); border-radius: var(--radius); display: block; }
+  figcaption { color: var(--muted); font-size: 0.9rem; text-align: center; margin-top: 12px; }
+  h2 { font-size: 1.5rem; margin: 56px 0 18px; }
+  .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 20px 22px; }
+  .card h3 { margin: 0 0 8px; font-size: 1.05rem; }
+  .card p { margin: 0; color: var(--muted); font-size: 0.95rem; }
+  ol, ul { color: var(--muted); }
+  ol li, ul li { margin-bottom: 8px; }
+  ol b, ul b, p b { color: var(--text); }
+  code {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 5px;
+    padding: 2px 6px; font-size: 0.9em;
+  }
+  .faq { border-top: 1px solid var(--line); padding: 18px 0; }
+  .faq:last-of-type { border-bottom: 1px solid var(--line); }
+  .faq h3 { margin: 0 0 6px; font-size: 1rem; }
+  .faq p { margin: 0; color: var(--muted); font-size: 0.95rem; }
+  footer { margin: 72px 0 48px; padding-top: 24px; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.9rem; text-align: center; }
+  @media (prefers-color-scheme: light) {
+    :root { --bg: #ffffff; --panel: #f6f7f9; --line: #e2e5ea; --text: #16181c; --muted: #5a626e; --accent: #0067c0; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>MultiTaskbar</h1>
+  <p class="tagline">A full taskbar on every monitor for Windows 11. Pinned apps, window previews,
+     volume and a clock on your second and third screen.</p>
+  <div class="buttons">
+    <a class="btn primary" href="https://github.com/Creahive/MultiTaskbar/releases/latest/download/MultiTaskbar.exe">Download for Windows</a>
+    <a class="btn ghost" href="https://github.com/Creahive/MultiTaskbar">View on GitHub</a>
+  </div>
+  <p class="note">Free and open source (MIT) · a single portable exe · no installer, service or telemetry</p>
+</header>
+
+<figure>
+  <img src="monitors.png" alt="MultiTaskbar on the left and right monitors, next to the untouched Windows taskbar on the main monitor">
+  <figcaption>Each bar lists only the windows on its own monitor. The main taskbar is left alone.</figcaption>
+</figure>
+
+<h2>What Windows 11 leaves out</h2>
+<p>On a secondary monitor Windows 11 gives you a reduced taskbar: no system tray, no volume icon, no
+   calendar, and pinned apps only if you also accept every window showing up on every screen.
+   MultiTaskbar hides those bars while it runs and draws a complete one in their place.</p>
+
+<div class="grid">
+  <div class="card">
+    <h3>Your pinned apps</h3>
+    <p>The Start button and the same pins, in the same order as your main taskbar. Pin or unpin as usual and the bars follow.</p>
+  </div>
+  <div class="card">
+    <h3>Only this monitor's windows</h3>
+    <p>With their titles, following the Windows setting for combining taskbar buttons. A window never shows up on every bar.</p>
+  </div>
+  <div class="card">
+    <h3>Live window previews</h3>
+    <p>Hover an app to see its windows, drawn by the desktop compositor itself. Click one to switch, middle-click to close it.</p>
+  </div>
+  <div class="card">
+    <h3>The real right-click menu</h3>
+    <p>Recent files, the window list, and Explorer's own entries: Run as administrator, Properties, Unpin from taskbar.</p>
+  </div>
+  <div class="card">
+    <h3>Volume, clock, calendar</h3>
+    <p>Click for a volume slider or the month, scroll to change either, and a show-desktop strip in the far corner.</p>
+  </div>
+  <div class="card">
+    <h3>Stays out of the way</h3>
+    <p>Follows your light or dark theme and accent color, scales to each monitor's DPI, and hides for full-screen apps.</p>
+  </div>
+</div>
+
+<h2>Install</h2>
+<ol>
+  <li><b>Download</b> <code>MultiTaskbar.exe</code> from the button above.</li>
+  <li><b>Put it somewhere it can stay</b>, for example <code>%LOCALAPPDATA%\Programs\MultiTaskbar</code>.</li>
+  <li><b>Run it.</b> It asks once whether to start with Windows, and can be reached from its tray icon afterwards.</li>
+</ol>
+<p class="note">Windows SmartScreen may warn about the download, because the exe is not code-signed.
+   Choose <b>More info → Run anyway</b>, or build it yourself: the whole app is one C# file, compiled
+   by the compiler that already ships with Windows.</p>
+
+<h2>Questions</h2>
+
+<div class="faq">
+  <h3>Does it replace my main taskbar?</h3>
+  <p>No. The main monitor is untouched. A Windows taskbar on another monitor is hidden only while a
+     MultiTaskbar bar is up on that same monitor, and comes back on exit, on a crash, or if the
+     process is killed.</p>
+</div>
+<div class="faq">
+  <h3>How do I remove it?</h3>
+  <p>From its tray icon, from Settings → Apps, or by running <code>MultiTaskbar.exe --uninstall</code>.
+     It restores the taskbars, removes its startup entry and settings, and deletes itself.</p>
+</div>
+<div class="faq">
+  <h3>How is it different from DisplayFusion or Actual Multiple Monitors?</h3>
+  <p>Those are paid suites that also add multi-monitor taskbars. MultiTaskbar does one thing, is free
+     and open source, and is a single exe of about 56 KB.</p>
+</div>
+<div class="faq">
+  <h3>Does it work on Windows 10?</h3>
+  <p>Yes, though Windows 10's own multi-monitor taskbar is already closer to complete, so there is
+     less to gain.</p>
+</div>
+<div class="faq">
+  <h3>What does it send anywhere?</h3>
+  <p>Nothing but a daily question to GitHub asking whether a newer release exists, which you can turn
+     off. No accounts, no analytics.</p>
+</div>
+
+<footer>
+  <p>Made by <a href="https://github.com/Creahive">Creahive</a> · MIT licensed ·
+     <a href="https://github.com/Creahive/MultiTaskbar/issues">Report an issue</a></p>
+</footer>
+
+</div>
+</body>
+</html>
