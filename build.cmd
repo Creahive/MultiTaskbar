@@ -9,6 +9,7 @@ if not exist "%CSC%" (
 )
 if not exist "%~dp0bin" mkdir "%~dp0bin"
 "%CSC%" /nologo /target:winexe /platform:x64 /optimize+ /out:"%~dp0bin\MultiTaskbar.exe" ^
+    /win32icon:"%~dp0src\icon.ico" ^
     /r:System.Windows.Forms.dll /r:System.Drawing.dll "%~dp0src\MultiTaskbar.cs"
 if errorlevel 1 exit /b 1
 echo Built %~dp0bin\MultiTaskbar.exe

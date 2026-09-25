@@ -26,7 +26,7 @@ namespace MultiTaskbar
 {
     static class Program
     {
-        public const string Version = "1.2.0";
+        public const string Version = "1.3.0";
         public const string Repo = "Creahive/MultiTaskbar";
 
         public static BarManager Manager;
@@ -36,9 +36,25 @@ namespace MultiTaskbar
         [STAThread]
         static void Main(string[] args)
         {
+            // Each bar sizes itself to the monitor it sits on, so the process must be told about
+            // per-monitor DPI before any window exists.
+            // The call exists from Windows 10 1703 on; older builds get the single-DPI version.
+            try
+            {
+                if (!Native.SetProcessDpiAwarenessContext(new IntPtr(-4) /*PER_MONITOR_AWARE_V2*/))
+                    Native.SetProcessDPIAware();
+            }
+            catch { try { Native.SetProcessDPIAware(); } catch { } }
+
             // Updates the exe in place and exits, for scripted deployments. Bars already running
             // keep the old build until they are restarted.
             if (Array.IndexOf(args, "--update") >= 0) { Updater.RunHeadless(); return; }
+            if (Array.IndexOf(args, "--uninstall") >= 0) { Uninstall.Run(); return; }
+
+            // Sits outside the app, waiting for it to end, and gives the Windows taskbars back if
+            // it ended without doing so itself.
+            int watch = Arg(args, "--watch");
+            if (watch > 0) { Guard.Watch(watch); return; }
 
             bool waitForPrevious = Array.IndexOf(args, "--wait") >= 0;
             bool created;
@@ -50,7 +66,6 @@ namespace MultiTaskbar
                     catch (System.Threading.AbandonedMutexException) { created = true; }
                 if (!created) return;
                 Updater.CleanUp();
-                Native.SetProcessDPIAware();
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
                 Application.ThreadException += delegate(object s, System.Threading.ThreadExceptionEventArgs e) { Log(e.Exception); };
@@ -63,6 +78,13 @@ namespace MultiTaskbar
                 try { Application.Run(Manager); }
                 finally { Manager.RestoreTaskbars(); }
             }
+        }
+
+        static int Arg(string[] args, string name)
+        {
+            int i = Array.IndexOf(args, name);
+            int value;
+            return i >= 0 && i + 1 < args.Length && int.TryParse(args[i + 1], out value) ? value : 0;
         }
 
         public static void Log(Exception ex)
@@ -98,6 +120,50 @@ namespace MultiTaskbar
         {
             object v = Get(name);
             return v is int ? (int)v != 0 : fallback;
+        }
+    }
+
+    // ------------------------------------------------------------------ watchdog
+
+    // The Windows taskbars on the other monitors stay hidden while MultiTaskbar runs. If the
+    // process is killed, nothing inside it can bring them back, so a second, idle copy waits for
+    // the first to end and restores them when it did not exit cleanly.
+    static class Guard
+    {
+        const string RunningFlag = "Running";
+
+        public static void MarkRunning() { Settings.Set(RunningFlag, 1); }
+        public static void MarkStopped() { Settings.Set(RunningFlag, 0); }
+
+        public static void Start()
+        {
+            try
+            {
+                Process.Start(new ProcessStartInfo(Application.ExecutablePath,
+                    "--watch " + Process.GetCurrentProcess().Id)
+                { UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden });
+            }
+            catch (Exception ex) { Program.Log(ex); }
+        }
+
+        public static void Watch(int pid)
+        {
+            try
+            {
+                Process p = null;
+                try { p = Process.GetProcessById(pid); } catch { }
+                if (p != null) { p.WaitForExit(); p.Dispose(); }
+                if (!Settings.Flag(RunningFlag, false)) return;   // it put the taskbars back itself
+                ShowTaskbars();
+                MarkStopped();
+            }
+            catch (Exception ex) { Program.Log(ex); }
+        }
+
+        public static void ShowTaskbars()
+        {
+            foreach (var h in Native.FindTopWindows("Shell_SecondaryTrayWnd"))
+                Native.ShowWindow(h, Native.SW_SHOWNOACTIVATE);
         }
     }
 
@@ -316,6 +382,179 @@ namespace MultiTaskbar
         }
     }
 
+    // ------------------------------------------------------------------ update dialogs
+
+    static class UpdateUi
+    {
+        public static void Check(Control ui)
+        {
+            Updater.Check(ui, delegate(string tag, Exception error)
+            {
+                if (error != null)
+                    Msg(ui, "Could not reach GitHub to check for updates.\n\n" + error.Message, MessageBoxIcon.Warning);
+                else if (tag == null)
+                    Msg(ui, "MultiTaskbar " + Program.Version + " is the latest version.", MessageBoxIcon.Information);
+                else if (Ask(ui, "MultiTaskbar " + tag + " is available. You have " + Program.Version + ".\n\n" +
+                                 "Download it and restart now?"))
+                    Install(ui);
+            });
+        }
+
+        public static void Install(Control ui)
+        {
+            Updater.Install(ui, delegate(bool ok, Exception error)
+            {
+                if (!ok) Msg(ui, "The update could not be installed.\n\n" + error.Message, MessageBoxIcon.Warning);
+            });
+        }
+
+        public static void Msg(Control ui, string text, MessageBoxIcon icon)
+        {
+            Native.SetForegroundWindow(ui.Handle);
+            MessageBox.Show(text, "MultiTaskbar", MessageBoxButtons.OK, icon);
+        }
+
+        public static bool Ask(Control ui, string text)
+        {
+            Native.SetForegroundWindow(ui.Handle);
+            return MessageBox.Show(text, "MultiTaskbar", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes;
+        }
+    }
+
+    // ------------------------------------------------------------------ tray icon
+
+    // A handle on the app that does not depend on the bars: if a bar fails to appear, or ends up on
+    // a monitor that is no longer there, this is still reachable from the main taskbar.
+    class Tray : IDisposable
+    {
+        readonly NotifyIcon icon = new NotifyIcon();
+        readonly BarManager manager;
+
+        public Tray(BarManager m)
+        {
+            manager = m;
+            icon.Icon = LoadIcon();
+            icon.Text = "MultiTaskbar " + Program.Version;
+            icon.Visible = true;
+            icon.MouseUp += delegate(object s, MouseEventArgs e) { if (e.Button == MouseButtons.Right || e.Button == MouseButtons.Left) Show(); };
+        }
+
+        static Icon LoadIcon()
+        {
+            try { return Icon.ExtractAssociatedIcon(Application.ExecutablePath); }
+            catch { return SystemIcons.Application; }
+        }
+
+        void Show()
+        {
+            var m = new ContextMenuStrip();
+            m.Items.Add(new ToolStripMenuItem("MultiTaskbar " + Program.Version) { Enabled = false });
+            m.Items.Add(new ToolStripSeparator());
+
+            var auto = new ToolStripMenuItem("Start with Windows") { Checked = Autostart.Enabled };
+            auto.Click += delegate { try { Autostart.Enabled = !auto.Checked; } catch (Exception ex) { Program.Log(ex); } };
+            m.Items.Add(auto);
+
+            if (manager.HasUpdate)
+            {
+                var up = new ToolStripMenuItem("Update to " + Updater.NewVersion + " and restart");
+                up.Font = new Font(up.Font, FontStyle.Bold);
+                up.Click += delegate { manager.InstallUpdate(); };
+                m.Items.Add(up);
+            }
+            else m.Items.Add("Check for updates", null, delegate { manager.CheckForUpdates(); });
+
+            m.Items.Add("Open file location", null, delegate
+            {
+                try { Process.Start(new ProcessStartInfo("explorer.exe", "/select,\"" + Application.ExecutablePath + "\"") { UseShellExecute = true }); }
+                catch (Exception ex) { Program.Log(ex); }
+            });
+            m.Items.Add(new ToolStripSeparator());
+            m.Items.Add("Uninstall MultiTaskbar", null, delegate { Uninstall.Launch(); });
+            m.Items.Add("Exit MultiTaskbar", null, delegate { manager.ExitApp(); });
+
+            m.Closed += delegate { m.Dispose(); };
+            Native.SetForegroundWindow(manager.Sync.Handle);
+            m.Show(Control.MousePosition);
+        }
+
+        public void Dispose()
+        {
+            icon.Visible = false;
+            icon.Dispose();
+        }
+    }
+
+    // ------------------------------------------------------------------ uninstall
+
+    static class Uninstall
+    {
+        const string ArpKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\MultiTaskbar";
+
+        // Listing the app in Settings > Apps is for copies the user placed themselves; when winget
+        // installed it, winget keeps its own entry and owns the removal.
+        public static void Register()
+        {
+            try
+            {
+                if (Application.ExecutablePath.IndexOf(@"\WinGet\Packages\", StringComparison.OrdinalIgnoreCase) >= 0) return;
+                using (var k = Registry.CurrentUser.CreateSubKey(ArpKey))
+                {
+                    k.SetValue("DisplayName", "MultiTaskbar");
+                    k.SetValue("DisplayVersion", Program.Version);
+                    k.SetValue("Publisher", "Creahive");
+                    k.SetValue("DisplayIcon", Application.ExecutablePath);
+                    k.SetValue("InstallLocation", Path.GetDirectoryName(Application.ExecutablePath));
+                    k.SetValue("URLInfoAbout", "https://github.com/" + Program.Repo);
+                    k.SetValue("UninstallString", "\"" + Application.ExecutablePath + "\" --uninstall");
+                    k.SetValue("NoModify", 1);
+                    k.SetValue("NoRepair", 1);
+                    try { k.SetValue("EstimatedSize", (int)(new FileInfo(Application.ExecutablePath).Length / 1024)); } catch { }
+                }
+            }
+            catch (Exception ex) { Program.Log(ex); }
+        }
+
+        // Started from the running app, so the removal happens in a process of its own.
+        public static void Launch()
+        {
+            try { Process.Start(new ProcessStartInfo(Application.ExecutablePath, "--uninstall") { UseShellExecute = false }); }
+            catch (Exception ex) { Program.Log(ex); }
+        }
+
+        public static void Run()
+        {
+            if (MessageBox.Show(
+                    "Remove MultiTaskbar?\n\n" +
+                    "The Windows taskbars come back on every monitor, the startup entry and settings are " +
+                    "removed, and the program deletes itself.",
+                    "Uninstall MultiTaskbar", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
+                return;
+
+            foreach (var p in Process.GetProcessesByName("MultiTaskbar"))
+            {
+                if (p.Id == Process.GetCurrentProcess().Id) continue;
+                try { p.Kill(); p.WaitForExit(4000); } catch (Exception ex) { Program.Log(ex); }
+            }
+            Guard.ShowTaskbars();
+
+            try { Autostart.Enabled = false; } catch (Exception ex) { Program.Log(ex); }
+            try { Registry.CurrentUser.DeleteSubKeyTree(Settings.Key, false); } catch (Exception ex) { Program.Log(ex); }
+            try { Registry.CurrentUser.DeleteSubKeyTree(ArpKey, false); } catch (Exception ex) { Program.Log(ex); }
+            try { Directory.Delete(Path.GetDirectoryName(Program.LogPath), true); } catch { }
+
+            // A running exe cannot delete itself, so a short shell command does it once this exits.
+            string exe = Application.ExecutablePath;
+            try
+            {
+                Process.Start(new ProcessStartInfo("cmd.exe",
+                    "/c ping -n 3 127.0.0.1 > nul & del /f /q \"" + exe + "\" & rmdir \"" + Path.GetDirectoryName(exe) + "\"")
+                { UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden });
+            }
+            catch (Exception ex) { Program.Log(ex); }
+        }
+    }
+
     // ------------------------------------------------------------------ start with Windows
 
     static class Autostart
@@ -388,6 +627,7 @@ namespace MultiTaskbar
         readonly Timer hideTimer = new Timer();
         readonly Timer updateTimer = new Timer();
         readonly Form sync = new Form();   // never shown; owns the thread that background work returns to
+        Tray tray;
         bool restored;
 
         public Control Sync { get { return sync; } }
@@ -398,11 +638,15 @@ namespace MultiTaskbar
             SystemEvents.DisplaySettingsChanged += OnDisplayChanged;
             SystemEvents.SessionEnding += delegate { RestoreTaskbars(); };
             hideTimer.Interval = 1000;
-            hideTimer.Tick += delegate { HideSecondaryTaskbars(); };
+            hideTimer.Tick += delegate { SyncTaskbars(); };
             hideTimer.Start();
-            HideSecondaryTaskbars();
+            SyncTaskbars();
+            Guard.MarkRunning();
+            Guard.Start();
+            tray = new Tray(this);
 
             Autostart.FixPath();
+            Uninstall.Register();
             var ask = new Timer { Interval = 1000 };
             ask.Tick += delegate { ask.Stop(); ask.Dispose(); Autostart.AskOnFirstRun(); };
             ask.Start();
@@ -436,11 +680,19 @@ namespace MultiTaskbar
             }
         }
 
-        public void HideSecondaryTaskbars()
+        // A Windows taskbar is hidden only while a bar of ours is actually up on that same monitor,
+        // and comes back as soon as it is not, so a screen is never left without one.
+        public void SyncTaskbars()
         {
             if (restored) return;
             foreach (var h in Native.FindTopWindows("Shell_SecondaryTrayWnd"))
-                if (Native.IsWindowVisible(h)) Native.ShowWindow(h, Native.SW_HIDE);
+            {
+                IntPtr mon = Native.MonitorFromWindow(h, 2);
+                bool covered = bars.Exists(b => b.Monitor == mon && b.IsUp);
+                bool visible = Native.IsWindowVisible(h);
+                if (covered && visible) Native.ShowWindow(h, Native.SW_HIDE);
+                else if (!covered && !visible) Native.ShowWindow(h, Native.SW_SHOWNOACTIVATE);
+            }
         }
 
         public void RestoreTaskbars()
@@ -449,17 +701,23 @@ namespace MultiTaskbar
             restored = true;
             hideTimer.Stop();
             updateTimer.Stop();
-            foreach (var h in Native.FindTopWindows("Shell_SecondaryTrayWnd"))
-                Native.ShowWindow(h, Native.SW_SHOWNOACTIVATE);
+            Guard.ShowTaskbars();
+            Guard.MarkStopped();
         }
 
         public void ExitApp()
         {
             RestoreTaskbars();
+            if (tray != null) { tray.Dispose(); tray = null; }
             foreach (var b in bars) { b.AllowClose = true; b.Close(); }
             bars.Clear();
             ExitThread();
         }
+
+        public bool HasUpdate { get { return Updater.NewVersion != null; } }
+
+        public void CheckForUpdates() { UpdateUi.Check(sync); }
+        public void InstallUpdate() { UpdateUi.Install(sync); }
     }
 
     // ------------------------------------------------------------------ bar
@@ -477,14 +735,15 @@ namespace MultiTaskbar
 
     class Bar : Form
     {
-        const int BTN = 44, LABEL_MAX = 180, LABEL_MIN = 80;
+        // Sizes are given for a 96 dpi screen and scaled to whichever monitor the bar lands on.
+        const int BTN_96 = 44, LABEL_MAX_96 = 180, LABEL_MIN_96 = 80;
         readonly Screen screen;
         readonly IntPtr hmon;
         readonly Timer timer = new Timer();
         readonly ToolTip tip = new ToolTip();
-        readonly Font clockFont = new Font("Segoe UI", 9f);
-        readonly Font labelFont = new Font("Segoe UI", 9f);
-        readonly Font glyphFont;
+        Font clockFont, labelFont, glyphFont;
+        float dpiScale = 1f;
+        int BTN = BTN_96, LABEL_MAX = LABEL_MAX_96, LABEL_MIN = LABEL_MIN_96;
         public bool AllowClose;
         List<Item> items = new List<Item>();
         Item hover, pressed;
@@ -499,7 +758,7 @@ namespace MultiTaskbar
             screen = s;
             var c = new Native.POINT { X = s.Bounds.Left + s.Bounds.Width / 2, Y = s.Bounds.Top + s.Bounds.Height / 2 };
             hmon = Native.MonitorFromPoint(c, 2);
-            glyphFont = Glyphs.MakeFont(12f);
+            ApplyDpi(Native.DpiForMonitor(hmon));
 
             Text = "MultiTaskbar";
             FormBorderStyle = FormBorderStyle.None;
@@ -509,7 +768,7 @@ namespace MultiTaskbar
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
 
             int h = s.Bounds.Bottom - s.WorkingArea.Bottom;
-            if (h < 32) h = 48;
+            if (h < Scale(32)) h = Scale(48);   // auto-hidden, or a taskbar that is not along the bottom
             Bounds = new Rectangle(s.Bounds.Left, s.Bounds.Bottom - h, s.Bounds.Width, h);
 
             tip.ShowAlways = true;
@@ -517,6 +776,35 @@ namespace MultiTaskbar
             timer.Interval = 400;
             timer.Tick += delegate { try { Tick(); } catch (Exception ex) { Program.Log(ex); } };
             timer.Start();
+        }
+
+        public IntPtr Monitor { get { return hmon; } }
+
+        // Whether this bar is really covering its monitor's taskbar slot right now.
+        public bool IsUp
+        {
+            get
+            {
+                return !IsDisposed && IsHandleCreated && Native.IsWindowVisible(Handle) && !hiddenForFullscreen
+                    && Native.MonitorFromWindow(Handle, 2) == hmon;
+            }
+        }
+
+        int Scale(int px96) { return (int)Math.Round(px96 * dpiScale); }
+
+        void ApplyDpi(int dpi)
+        {
+            dpiScale = dpi / 96f;
+            BTN = Scale(BTN_96);
+            LABEL_MAX = Scale(LABEL_MAX_96);
+            LABEL_MIN = Scale(LABEL_MIN_96);
+            if (clockFont != null) clockFont.Dispose();
+            if (labelFont != null) labelFont.Dispose();
+            if (glyphFont != null) glyphFont.Dispose();
+            clockFont = new Font("Segoe UI", 9f * dpiScale);
+            labelFont = new Font("Segoe UI", 9f * dpiScale);
+            glyphFont = Glyphs.MakeFont(12f * dpiScale);
+            lastSig = "";
         }
 
         protected override bool ShowWithoutActivation { get { return true; } }
@@ -577,12 +865,12 @@ namespace MultiTaskbar
             var list = new List<Item>();
             int W = ClientSize.Width, H = ClientSize.Height;
 
-            var desk = new Item { Kind = "desktop", Rect = new Rectangle(W - 12, 0, 12, H) };
-            var clock = new Item { Kind = "clock", Rect = new Rectangle(desk.Rect.Left - 92, 0, 88, H) };
-            var vol = new Item { Kind = "volume", Rect = new Rectangle(clock.Rect.Left - 42, 0, 40, H) };
-            int limit = vol.Rect.Left - 8;
+            var desk = new Item { Kind = "desktop", Rect = new Rectangle(W - Scale(12), 0, Scale(12), H) };
+            var clock = new Item { Kind = "clock", Rect = new Rectangle(desk.Rect.Left - Scale(92), 0, Scale(88), H) };
+            var vol = new Item { Kind = "volume", Rect = new Rectangle(clock.Rect.Left - Scale(42), 0, Scale(40), H) };
+            int limit = vol.Rect.Left - Scale(8);
 
-            int x = 6;
+            int x = Scale(6);
             list.Add(new Item { Kind = "start", Rect = new Rectangle(x, 0, BTN, H) });
             x += BTN;
 
@@ -745,9 +1033,9 @@ namespace MultiTaskbar
             }
         }
 
-        static void DrawStart(Graphics g, Rectangle r)
+        void DrawStart(Graphics g, Rectangle r)
         {
-            int s = 9, gap = 2;
+            int s = Scale(9), gap = Scale(2);
             int x0 = r.Left + (r.Width - (s * 2 + gap)) / 2;
             int y0 = r.Top + (r.Height - (s * 2 + gap)) / 2;
             using (var b = new SolidBrush(Color.FromArgb(0, 120, 212)))
@@ -761,16 +1049,16 @@ namespace MultiTaskbar
 
         void DrawApp(Graphics g, Item it, Rectangle r, bool active, Color fgc)
         {
-            const int sz = 24;
-            int iconLeft = it.Label != null ? r.Left + 10 : r.Left + (r.Width - sz) / 2;
+            int sz = Scale(24);
+            int iconLeft = it.Label != null ? r.Left + Scale(10) : r.Left + (r.Width - sz) / 2;
             var ir = new Rectangle(iconLeft, r.Top + (r.Height - sz) / 2 - 1, sz, sz);
             if (it.Icon != null) g.DrawImage(it.Icon, ir);
             else using (var b = new SolidBrush(Color.FromArgb(90, fgc))) g.FillEllipse(b, ir);
 
             if (it.Label != null)
             {
-                var tr = new Rectangle(ir.Right + 8, r.Top, r.Right - ir.Right - 14, r.Height);
-                if (tr.Width > 8)
+                var tr = new Rectangle(ir.Right + Scale(8), r.Top, r.Right - ir.Right - Scale(14), r.Height);
+                if (tr.Width > Scale(8))
                     TextRenderer.DrawText(g, it.Label, labelFont, tr, fgc,
                         TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine
                         | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
@@ -778,10 +1066,10 @@ namespace MultiTaskbar
 
             if (it.Windows.Count > 0)
             {
-                int w = active ? 16 : 6;
-                var ind = new Rectangle(ir.Left + (ir.Width - w) / 2, r.Bottom - 3, w, 3);
+                int w = Scale(active ? 16 : 6), t = Scale(3);
+                var ind = new Rectangle(ir.Left + (ir.Width - w) / 2, r.Bottom - t, w, t);
                 using (var b = new SolidBrush(active ? Theme.Accent : Color.FromArgb(150, fgc)))
-                using (var path = RoundRect(ind, 1))
+                using (var path = RoundRect(ind, Scale(1)))
                     g.FillPath(b, path);
             }
         }
@@ -1129,43 +1417,22 @@ namespace MultiTaskbar
         // Owner-drawn entries added by shell extensions need these messages forwarded to them.
         protected override void WndProc(ref Message m)
         {
+            if (m.Msg == 0x02E0 /*WM_DPICHANGED*/)
+            {
+                ApplyDpi((int)(m.WParam.ToInt64() & 0xFFFF));
+                int h = screen.Bounds.Bottom - screen.WorkingArea.Bottom;
+                if (h < Scale(32)) h = Scale(48);
+                Bounds = new Rectangle(screen.Bounds.Left, screen.Bounds.Bottom - h, screen.Bounds.Width, h);
+                Invalidate();
+                return;
+            }
             if (shellMenu != null && shellMenu.HandleMessage(ref m)) return;
             base.WndProc(ref m);
         }
 
-        void CheckForUpdates()
-        {
-            Updater.Check(this, delegate(string tag, Exception error)
-            {
-                if (error != null)
-                    Msg("Could not reach GitHub to check for updates.\n\n" + error.Message, MessageBoxIcon.Warning);
-                else if (tag == null)
-                    Msg("MultiTaskbar " + Program.Version + " is the latest version.", MessageBoxIcon.Information);
-                else if (Ask("MultiTaskbar " + tag + " is available. You have " + Program.Version + ".\n\n" +
-                             "Download it and restart now?"))
-                    InstallUpdate();
-            });
-        }
+        void CheckForUpdates() { UpdateUi.Check(this); }
 
-        void InstallUpdate()
-        {
-            Updater.Install(this, delegate(bool ok, Exception error)
-            {
-                if (!ok) Msg("The update could not be installed.\n\n" + error.Message, MessageBoxIcon.Warning);
-            });
-        }
-
-        void Msg(string text, MessageBoxIcon icon)
-        {
-            Native.SetForegroundWindow(Handle);
-            MessageBox.Show(this, text, "MultiTaskbar", MessageBoxButtons.OK, icon);
-        }
-
-        bool Ask(string text)
-        {
-            Native.SetForegroundWindow(Handle);
-            return MessageBox.Show(this, text, "MultiTaskbar", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes;
-        }
+        void InstallUpdate() { UpdateUi.Install(this); }
 
         protected override void Dispose(bool disposing)
         {
@@ -2177,6 +2444,9 @@ namespace MultiTaskbar
         [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
         [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
         [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+        [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr h);
+        [DllImport("user32.dll", SetLastError = true)] public static extern bool SetProcessDpiAwarenessContext(IntPtr context);
+        [DllImport("shcore.dll")] public static extern int GetDpiForMonitor(IntPtr hmon, int type, out uint dpiX, out uint dpiY);
         [DllImport("user32.dll")] public static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);
         [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
         [DllImport("user32.dll", EntryPoint = "GetClassLongPtrW")] public static extern IntPtr GetClassLongPtr(IntPtr h, int idx);
@@ -2225,9 +2495,23 @@ namespace MultiTaskbar
             string cls = ClassName(fg);
             if (cls == "Progman" || cls == "WorkerW" || cls == "Shell_TrayWnd" || cls == "Shell_SecondaryTrayWnd") return false;
             if (MonitorFromWindow(fg, 2) != hmon) return false;
+            // A maximized window is not full screen, however far its frame reaches. Treating it as
+            // one would make the bar disappear whenever a window is maximized on that monitor.
+            if (IsZoomed(fg)) return false;
             RECT r;
             if (!GetWindowRect(fg, out r)) return false;
             return r.Left <= b.Left && r.Top <= b.Top && r.Right >= b.Right && r.Bottom >= b.Bottom;
+        }
+
+        public static int DpiForMonitor(IntPtr hmon)
+        {
+            try
+            {
+                uint x, y;
+                if (GetDpiForMonitor(hmon, 0 /*MDT_EFFECTIVE_DPI*/, out x, out y) == 0 && x > 0) return (int)x;
+            }
+            catch { }
+            return 96;
         }
     }
 }

@@ -19,9 +19,13 @@ secondary taskbars with a complete one:
 - **Clock and date**, and **Show desktop** in the far-right corner
 - Light and dark theme and your accent color, picked up from Windows
 - Hides itself when an app goes full screen
+- **A tray icon** on the main taskbar, so the app can be reached even if a bar does not appear
+- Scales to each monitor's DPI, so a 4K screen next to a 1080p one both look right
 
-Your main monitor's taskbar is not touched. When MultiTaskbar exits, the original Windows
-taskbars on the other monitors come back.
+Your main monitor's taskbar is not touched. A Windows taskbar on another monitor is hidden only
+while a MultiTaskbar bar is actually up on that same monitor, and comes back the moment it is not:
+on exit, on a crash, and even if the process is killed, because a second, idle copy of the program
+watches the first and restores the taskbars if it ends without doing so.
 
 ## Install
 
@@ -55,8 +59,9 @@ Windows SmartScreen may warn about the download because the exe is not code-sign
 | Right-click an app | Recent files, window list, the shell's own menu (Run as administrator, Properties, Unpin), close |
 | Right-click an empty spot | Task Manager, Start with Windows, updates, Exit |
 | Click the clock | Date & time settings |
+| Click the tray icon | The same settings, plus Open file location and Uninstall |
 
-To quit, right-click an empty spot on the bar and choose **Exit MultiTaskbar**.
+To quit, right-click an empty spot on the bar, or the tray icon, and choose **Exit MultiTaskbar**.
 
 ## Build from source
 
@@ -94,9 +99,18 @@ MultiTaskbar follows it within a few seconds.
 
 ## Uninstall
 
-Right-click the bar, turn off **Start with Windows**, choose **Exit MultiTaskbar**, then delete
-the exe. Optional leftovers: the registry key `HKCU\Software\MultiTaskbar` and the log folder
-`%LOCALAPPDATA%\MultiTaskbar`.
+Pick **Uninstall MultiTaskbar** from the tray menu, or find MultiTaskbar in **Settings > Apps >
+Installed apps**, or run `MultiTaskbar.exe --uninstall`. It brings the Windows taskbars back,
+removes the startup entry, its settings and its log, and deletes the exe. Installed through winget
+instead? Then `winget uninstall MultiTaskbar` does it.
+
+## Known limits
+
+- The system tray itself stays on the main monitor. MultiTaskbar shows volume, clock and show
+  desktop, not the full tray.
+- Windows on other virtual desktops are not listed, matching the real taskbar.
+- If your Windows taskbar auto-hides, or sits on the top or a side of the screen (Windows 10),
+  MultiTaskbar still draws along the bottom and does not reserve screen space of its own.
 
 ## License
 
