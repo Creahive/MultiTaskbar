@@ -15,8 +15,9 @@ secondary taskbars with a complete one:
   (icons only when set to *Always*)
 - **The right-click menu of the real taskbar**: the files the app opened lately, its windows, and
   Explorer's own entries, including *Run as administrator*, *Properties* and *Unpin from taskbar*
+- **Live window previews** on hover, drawn by the desktop compositor, as on the real taskbar
 - **Volume**: click for a slider, scroll to change, middle-click to mute
-- **Clock and date**, and **Show desktop** in the far-right corner
+- **Clock and date** with a **calendar** when you click them, and **Show desktop** in the corner
 - Light and dark theme and your accent color, picked up from Windows
 - Hides itself when an app goes full screen
 - **A tray icon** on the main taskbar, so the app can be reached even if a bar does not appear
@@ -54,11 +55,12 @@ Windows SmartScreen may warn about the download because the exe is not code-sign
 
 | Action | Result |
 | --- | --- |
+| Hover an app | Live previews of its windows; click one to switch, middle-click to close it |
 | Click an app | Switch to it, minimize it, or cycle through its windows |
 | Shift+click or middle-click an app | Open a new window |
 | Right-click an app | Recent files, window list, the shell's own menu (Run as administrator, Properties, Unpin), close |
 | Right-click an empty spot | Task Manager, Start with Windows, updates, Exit |
-| Click the clock | Date & time settings |
+| Click the clock | A calendar; scroll or use the arrows for other months, right-click for date & time settings |
 | Click the tray icon | The same settings, plus Open file location and Uninstall |
 
 To quit, right-click an empty spot on the bar, or the tray icon, and choose **Exit MultiTaskbar**.

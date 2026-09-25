@@ -8,6 +8,7 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Drawing.Text;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -26,7 +27,7 @@ namespace MultiTaskbar
 {
     static class Program
     {
-        public const string Version = "1.3.0";
+        public const string Version = "1.4.0";
         public const string Repo = "Creahive/MultiTaskbar";
 
         public static BarManager Manager;
@@ -428,6 +429,9 @@ namespace MultiTaskbar
     class Tray : IDisposable
     {
         readonly NotifyIcon icon = new NotifyIcon();
+        // One menu, refilled before each showing: disposing a drop-down from its own Closed event
+        // makes WinForms reach for it again afterwards.
+        readonly ContextMenuStrip menu = new ContextMenuStrip();
         readonly BarManager manager;
 
         public Tray(BarManager m)
@@ -447,7 +451,8 @@ namespace MultiTaskbar
 
         void Show()
         {
-            var m = new ContextMenuStrip();
+            var m = menu;
+            while (m.Items.Count > 0) { var item = m.Items[0]; m.Items.RemoveAt(0); item.Dispose(); }
             m.Items.Add(new ToolStripMenuItem("MultiTaskbar " + Program.Version) { Enabled = false });
             m.Items.Add(new ToolStripSeparator());
 
@@ -473,7 +478,6 @@ namespace MultiTaskbar
             m.Items.Add("Uninstall MultiTaskbar", null, delegate { Uninstall.Launch(); });
             m.Items.Add("Exit MultiTaskbar", null, delegate { manager.ExitApp(); });
 
-            m.Closed += delegate { m.Dispose(); };
             Native.SetForegroundWindow(manager.Sync.Handle);
             m.Show(Control.MousePosition);
         }
@@ -482,6 +486,7 @@ namespace MultiTaskbar
         {
             icon.Visible = false;
             icon.Dispose();
+            menu.Dispose();
         }
     }
 
@@ -751,6 +756,10 @@ namespace MultiTaskbar
         IntPtr lastFg;
         bool hiddenForFullscreen;
         VolumePopup volPopup;
+        CalendarPopup calendar;
+        PreviewPopup preview;
+        Item previewFor;
+        DateTime hoverSince = DateTime.MaxValue;
         ShellMenu shellMenu;
 
         public Bar(Screen s)
@@ -780,13 +789,16 @@ namespace MultiTaskbar
 
         public IntPtr Monitor { get { return hmon; } }
 
-        // Whether this bar is really covering its monitor's taskbar slot right now.
+        // Whether this bar is holding its monitor's taskbar slot. Stepping aside for a full-screen
+        // window counts as holding it: Windows hides its own taskbar then too, and showing it again
+        // would only have the two of us fighting over it once a second.
         public bool IsUp
         {
             get
             {
-                return !IsDisposed && IsHandleCreated && Native.IsWindowVisible(Handle) && !hiddenForFullscreen
-                    && Native.MonitorFromWindow(Handle, 2) == hmon;
+                if (IsDisposed || !IsHandleCreated) return false;
+                if (Native.MonitorFromWindow(Handle, 2) != hmon) return false;
+                return hiddenForFullscreen || Native.IsWindowVisible(Handle);
             }
         }
 
@@ -836,8 +848,11 @@ namespace MultiTaskbar
             {
                 hiddenForFullscreen = fs;
                 Native.ShowWindow(Handle, fs ? Native.SW_HIDE : Native.SW_SHOWNOACTIVATE);
+                if (fs) ClosePreview();
             }
             if (fs) return;
+
+            UpdatePreview();
 
             if (fg != lastFg)
             {
@@ -1120,16 +1135,55 @@ namespace MultiTaskbar
             if (it != hover)
             {
                 hover = it;
+                hoverSince = DateTime.Now;
                 Invalidate();
                 tip.Hide(this);
                 tip.SetToolTip(this, TooltipFor(it));
+                if (preview != null && it != previewFor) ClosePreview();
             }
+        }
+
+        // Previews stand in for the tooltip on app buttons, and only once the pointer has settled.
+        void UpdatePreview()
+        {
+            var it = hover;
+            bool wanted = it != null && (it.Kind == "pin" || it.Kind == "win") && it.Windows.Count > 0
+                && (DateTime.Now - hoverSince).TotalMilliseconds > 450 && !hiddenForFullscreen;
+
+            if (preview != null && (preview.IsDisposed || !preview.Visible)) { preview = null; previewFor = null; }
+
+            if (!wanted)
+            {
+                // Keep it open while the pointer is inside it.
+                if (preview != null && !preview.Owns(Cursor.Position) && !Bounds.Contains(Cursor.Position)) ClosePreview();
+                return;
+            }
+            if (preview != null && previewFor == it) return;
+            ClosePreview();
+
+            previewFor = it;
+            preview = new PreviewPopup(it.Windows, it.Icon, dpiScale);
+            var anchor = PointToScreen(new Point(it.Rect.Left + it.Rect.Width / 2, 0));
+            int x = Math.Max(screen.Bounds.Left + Scale(8),
+                Math.Min(anchor.X - preview.Width / 2, screen.Bounds.Right - preview.Width - Scale(8)));
+            preview.Location = new Point(x, Top - preview.Height - Scale(8));
+            preview.Show();
+            Native.SetWindowPos(preview.Handle, Native.HWND_TOPMOST, 0, 0, 0, 0,
+                Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE);
+        }
+
+        void ClosePreview()
+        {
+            if (preview != null && !preview.IsDisposed) preview.Close();
+            preview = null;
+            previewFor = null;
         }
 
         protected override void OnMouseLeave(EventArgs e)
         {
             base.OnMouseLeave(e);
             hover = null; pressed = null;
+            hoverSince = DateTime.MaxValue;
             tip.SetToolTip(this, null);
             Invalidate();
         }
@@ -1153,6 +1207,7 @@ namespace MultiTaskbar
                 if (it == null && e.Button == MouseButtons.Right) ShowBarMenu(e.Location);
                 return;
             }
+            ClosePreview();
             try { OnItemClick(it, e); } catch (Exception ex) { Program.Log(ex); }
             lastSig = ""; // force refresh
         }
@@ -1181,10 +1236,10 @@ namespace MultiTaskbar
                     return "Volume: " + (int)Math.Round(Volume.Level * 100) + "%" + (Volume.Muted ? " (muted)" : "");
                 case "pin":
                 case "win":
-                    var lines = new List<string>();
-                    if (it.Pin != null) lines.Add(it.Pin.Name);
-                    foreach (var w in it.Windows) lines.Add((it.Pin != null ? "  " : "") + WindowScanner.Title(w));
-                    return string.Join("\n", lines.ToArray());
+                    // Open windows get previews instead; the tooltip is only for the pin itself.
+                    if (it.Windows.Count > 0) return null;
+                    return it.Pin != null ? it.Pin.Name
+                        : (it.Exe != null ? Path.GetFileNameWithoutExtension(it.Exe) : null);
             }
             return null;
         }
@@ -1203,7 +1258,8 @@ namespace MultiTaskbar
                     Shell.ToggleDesktop();
                     return;
                 case "clock":
-                    Launch("ms-settings:dateandtime", null);
+                    if (e.Button == MouseButtons.Right) { Launch("ms-settings:dateandtime", null); return; }
+                    ToggleCalendar(it);
                     return;
                 case "volume":
                     if (e.Button == MouseButtons.Middle) { Volume.ToggleMute(); return; }
@@ -1253,6 +1309,18 @@ namespace MultiTaskbar
                 Process.Start(psi);
             }
             catch (Exception ex) { Program.Log(ex); }
+        }
+
+        void ToggleCalendar(Item it)
+        {
+            if (calendar != null && !calendar.IsDisposed && calendar.Visible) { calendar.Close(); return; }
+            calendar = new CalendarPopup(dpiScale);
+            var pt = PointToScreen(new Point(it.Rect.Right, 0));
+            int x = Math.Max(screen.Bounds.Left + 8, Math.Min(pt.X - calendar.Width, screen.Bounds.Right - calendar.Width - 8));
+            calendar.Location = new Point(x, Top - calendar.Height - Scale(10));
+            calendar.Show();
+            calendar.Activate();
+            Native.SetForegroundWindow(calendar.Handle);
         }
 
         void ToggleVolumePopup(Item it)
@@ -1436,7 +1504,12 @@ namespace MultiTaskbar
 
         protected override void Dispose(bool disposing)
         {
-            if (disposing) { timer.Dispose(); tip.Dispose(); clockFont.Dispose(); labelFont.Dispose(); glyphFont.Dispose(); }
+            if (disposing)
+            {
+                ClosePreview();
+                if (calendar != null && !calendar.IsDisposed) calendar.Close();
+                timer.Dispose(); tip.Dispose(); clockFont.Dispose(); labelFont.Dispose(); glyphFont.Dispose();
+            }
             base.Dispose(disposing);
         }
     }
@@ -1550,6 +1623,376 @@ namespace MultiTaskbar
         protected override void Dispose(bool disposing)
         {
             if (disposing) { timer.Dispose(); glyph.Dispose(); text.Dispose(); }
+            base.Dispose(disposing);
+        }
+    }
+
+    // ------------------------------------------------------------------ window previews
+
+    // Live thumbnails of an app's windows, the way the real taskbar shows them on hover. The
+    // pictures are drawn by the desktop compositor itself: the popup only tells it where to put
+    // each one, so nothing is copied or redrawn here.
+    class PreviewPopup : Form
+    {
+        class Entry
+        {
+            public IntPtr Window, Thumb;
+            public Rectangle Cell, Thumbnail;
+            public string Title;
+            public Bitmap Icon;
+            public bool Minimized;
+        }
+
+        readonly List<Entry> entries = new List<Entry>();
+        readonly float scale;
+        readonly Font font;
+        Entry hover;
+
+        public PreviewPopup(List<IntPtr> windows, Bitmap icon, float dpiScale)
+        {
+            scale = dpiScale;
+            font = new Font("Segoe UI", 8.5f * scale);
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            TopMost = true;
+            StartPosition = FormStartPosition.Manual;
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true);
+
+            int cellW = S(196), cellH = S(150), pad = S(8), title = S(22);
+            int n = Math.Min(windows.Count, 6);
+            for (int i = 0; i < n; i++)
+            {
+                var e = new Entry
+                {
+                    Window = windows[i],
+                    Title = WindowScanner.Title(windows[i]),
+                    Icon = icon ?? WindowScanner.Icon(windows[i]),
+                    Minimized = Native.IsIconic(windows[i]),
+                    Cell = new Rectangle(pad + i * (cellW + pad), pad, cellW, cellH),
+                };
+                e.Thumbnail = new Rectangle(e.Cell.Left + S(6), e.Cell.Top + title, e.Cell.Width - S(12), e.Cell.Height - title - S(6));
+                entries.Add(e);
+            }
+            Size = new Size(pad + n * (cellW + pad), cellH + 2 * pad);
+        }
+
+        int S(int px) { return (int)Math.Round(px * scale); }
+
+        public bool Owns(Point screenPoint) { return !IsDisposed && Visible && Bounds.Contains(screenPoint); }
+
+        protected override bool ShowWithoutActivation { get { return true; } }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                var cp = base.CreateParams;
+                cp.ExStyle |= Native.WS_EX_TOOLWINDOW | Native.WS_EX_NOACTIVATE | Native.WS_EX_TOPMOST;
+                return cp;
+            }
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            int round = 2;
+            Native.DwmSetWindowAttribute(Handle, 33, ref round, 4);
+            foreach (var entry in entries) Register(entry);
+        }
+
+        void Register(Entry e)
+        {
+            if (e.Minimized) return;   // a minimized window has nothing to show
+            try
+            {
+                IntPtr thumb;
+                if (Native.DwmRegisterThumbnail(Handle, e.Window, out thumb) != 0 || thumb == IntPtr.Zero) return;
+                e.Thumb = thumb;
+                var props = new Native.DWM_THUMBNAIL_PROPERTIES
+                {
+                    dwFlags = 0x1 /*DESTINATION*/ | 0x4 /*OPACITY*/ | 0x8 /*VISIBLE*/ | 0x10 /*CLIENT AREA ONLY*/,
+                    rcDestination = new Native.RECT
+                    {
+                        Left = e.Thumbnail.Left,
+                        Top = e.Thumbnail.Top,
+                        Right = e.Thumbnail.Right,
+                        Bottom = e.Thumbnail.Bottom,
+                    },
+                    opacity = 255,
+                    fVisible = true,
+                    fSourceClientAreaOnly = true,
+                };
+                Native.DwmUpdateThumbnailProperties(thumb, ref props);
+            }
+            catch (Exception ex) { Program.Log(ex); }
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+            bool light = Theme.Light;
+            Color fg = light ? Color.Black : Color.White;
+            g.Clear(light ? Color.FromArgb(249, 249, 249) : Color.FromArgb(44, 44, 44));
+            using (var p = new Pen(light ? Color.FromArgb(210, 210, 210) : Color.FromArgb(70, 70, 70)))
+                g.DrawRectangle(p, 0, 0, Width - 1, Height - 1);
+
+            foreach (var entry in entries)
+            {
+                if (entry == hover)
+                    using (var b = new SolidBrush(Color.FromArgb(28, fg)))
+                    using (var path = Bar.RoundRect(entry.Cell, S(6)))
+                        g.FillPath(b, path);
+
+                var titleRect = new Rectangle(entry.Cell.Left + S(6), entry.Cell.Top + S(3), entry.Cell.Width - S(12), S(18));
+                if (entry.Icon != null)
+                {
+                    int sz = S(14);
+                    g.DrawImage(entry.Icon, new Rectangle(titleRect.Left, titleRect.Top + (titleRect.Height - sz) / 2, sz, sz));
+                    titleRect = new Rectangle(titleRect.Left + sz + S(5), titleRect.Top, titleRect.Width - sz - S(5), titleRect.Height);
+                }
+                TextRenderer.DrawText(g, entry.Title, font, titleRect, fg,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine
+                    | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+
+                // The compositor paints live windows itself; a minimized one gets its icon instead.
+                if (entry.Thumb == IntPtr.Zero)
+                {
+                    using (var b = new SolidBrush(Color.FromArgb(light ? 18 : 30, fg)))
+                    using (var path = Bar.RoundRect(entry.Thumbnail, S(4)))
+                        g.FillPath(b, path);
+                    if (entry.Icon != null)
+                    {
+                        int sz = S(32);
+                        g.DrawImage(entry.Icon, new Rectangle(
+                            entry.Thumbnail.Left + (entry.Thumbnail.Width - sz) / 2,
+                            entry.Thumbnail.Top + (entry.Thumbnail.Height - sz) / 2, sz, sz));
+                    }
+                }
+            }
+        }
+
+        Entry At(Point p) { return entries.Find(e => e.Cell.Contains(p)); }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            var h = At(e.Location);
+            if (h != hover) { hover = h; Invalidate(); }
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            base.OnMouseLeave(e);
+            if (hover != null) { hover = null; Invalidate(); }
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            base.OnMouseUp(e);
+            var entry = At(e.Location);
+            if (entry == null) return;
+            if (e.Button == MouseButtons.Middle)
+                Native.PostMessage(entry.Window, 0x0010 /*WM_CLOSE*/, IntPtr.Zero, IntPtr.Zero);
+            else if (e.Button == MouseButtons.Left)
+                Native.Activate(entry.Window);
+            Close();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            foreach (var e in entries)
+                if (e.Thumb != IntPtr.Zero) { try { Native.DwmUnregisterThumbnail(e.Thumb); } catch { } e.Thumb = IntPtr.Zero; }
+            if (disposing) font.Dispose();
+            base.Dispose(disposing);
+        }
+    }
+
+    // ------------------------------------------------------------------ calendar
+
+    // The small month the real taskbar shows when the clock is clicked.
+    class CalendarPopup : Form
+    {
+        readonly float scale;
+        readonly Font dayFont, headFont, titleFont, weekFont;
+        DateTime month = DateTime.Today;
+        Rectangle prev, next;
+        int hoverDay;
+
+        const int COLS = 7, ROWS = 6;
+
+        public CalendarPopup(float dpiScale)
+        {
+            scale = dpiScale;
+            dayFont = new Font("Segoe UI", 9.5f * scale);
+            weekFont = new Font("Segoe UI", 8.5f * scale);
+            headFont = new Font("Segoe UI Semibold", 11f * scale, FontStyle.Bold);
+            titleFont = new Font("Segoe UI", 20f * scale);
+
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            TopMost = true;
+            StartPosition = FormStartPosition.Manual;
+            KeyPreview = true;
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true);
+            Size = new Size(S(320), S(400));
+        }
+
+        int S(int px) { return (int)Math.Round(px * scale); }
+
+        protected override CreateParams CreateParams
+        {
+            get { var cp = base.CreateParams; cp.ExStyle |= Native.WS_EX_TOOLWINDOW; return cp; }
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            int round = 2; // DWMWCP_ROUND
+            Native.DwmSetWindowAttribute(Handle, 33, ref round, 4);
+        }
+
+        protected override void OnDeactivate(EventArgs e) { base.OnDeactivate(e); Close(); }
+
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            base.OnKeyDown(e);
+            if (e.KeyCode == Keys.Escape) Close();
+            else if (e.KeyCode == Keys.Left) { month = month.AddMonths(-1); Invalidate(); }
+            else if (e.KeyCode == Keys.Right) { month = month.AddMonths(1); Invalidate(); }
+            else if (e.KeyCode == Keys.Home) { month = DateTime.Today; Invalidate(); }
+        }
+
+        Rectangle Grid { get { return new Rectangle(S(12), S(130), Width - S(24), Height - S(142)); } }
+
+        Rectangle CellAt(int col, int row)
+        {
+            var g = Grid;
+            int cw = g.Width / COLS, ch = (g.Height - S(24)) / ROWS;
+            return new Rectangle(g.Left + col * cw, g.Top + S(24) + row * ch, cw, ch);
+        }
+
+        DateTime FirstCell()
+        {
+            var first = new DateTime(month.Year, month.Month, 1);
+            int start = (int)DateTimeFormatInfo.CurrentInfo.FirstDayOfWeek;
+            int shift = ((int)first.DayOfWeek - start + 7) % 7;
+            return first.AddDays(-shift);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            // Grey antialiasing: subpixel rendering leaves colour fringes on the small digits.
+            g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+            bool light = Theme.Light;
+            Color fg = light ? Color.Black : Color.White;
+            Color dim = Color.FromArgb(120, fg);
+            g.Clear(light ? Color.FromArgb(249, 249, 249) : Color.FromArgb(44, 44, 44));
+            using (var p = new Pen(light ? Color.FromArgb(210, 210, 210) : Color.FromArgb(70, 70, 70)))
+                g.DrawRectangle(p, 0, 0, Width - 1, Height - 1);
+
+            var now = DateTime.Now;
+            using (var b = new SolidBrush(fg))
+            {
+                g.DrawString(now.ToString("t"), titleFont, b, S(14), S(12));
+                g.DrawString(now.ToString("D"), dayFont, new SolidBrush(dim), S(16), S(58));
+                g.DrawString(month.ToString("MMMM yyyy"), headFont, b, S(14), S(92));
+            }
+
+            // Month arrows
+            prev = new Rectangle(Width - S(76), S(88), S(28), S(28));
+            next = new Rectangle(Width - S(44), S(88), S(28), S(28));
+            DrawChevron(g, prev, fg, true);
+            DrawChevron(g, next, fg, false);
+
+            // Weekday row
+            var names = DateTimeFormatInfo.CurrentInfo.AbbreviatedDayNames;
+            int start = (int)DateTimeFormatInfo.CurrentInfo.FirstDayOfWeek;
+            using (var b = new SolidBrush(dim))
+            using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+                for (int c = 0; c < COLS; c++)
+                {
+                    var cell = CellAt(c, 0);
+                    g.DrawString(names[(start + c) % 7].Substring(0, Math.Min(2, names[(start + c) % 7].Length)),
+                        weekFont, b, new Rectangle(cell.Left, Grid.Top, cell.Width, S(24)), sf);
+                }
+
+            var day = FirstCell();
+            using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+                for (int r = 0; r < ROWS; r++)
+                    for (int c = 0; c < COLS; c++, day = day.AddDays(1))
+                    {
+                        var cell = CellAt(c, r);
+                        bool thisMonth = day.Month == month.Month;
+                        bool today = day.Date == DateTime.Today;
+                        int size = Math.Min(cell.Width, cell.Height) - S(6);
+                        var dot = new Rectangle(cell.Left + (cell.Width - size) / 2, cell.Top + (cell.Height - size) / 2, size, size);
+
+                        if (today)
+                            using (var b = new SolidBrush(Theme.Accent)) g.FillEllipse(b, dot);
+                        else if (hoverDay == DayKey(day))
+                            using (var b = new SolidBrush(Color.FromArgb(30, fg))) g.FillEllipse(b, dot);
+
+                        Color text = today ? Color.White : (thisMonth ? fg : dim);
+                        using (var b = new SolidBrush(text))
+                            g.DrawString(day.Day.ToString(), dayFont, b, cell, sf);
+                    }
+        }
+
+        static int DayKey(DateTime d) { return d.Year * 10000 + d.Month * 100 + d.Day; }
+
+        void DrawChevron(Graphics g, Rectangle r, Color fg, bool left)
+        {
+            using (var p = new Pen(Color.FromArgb(hoverArrow == (left ? 1 : 2) ? 255 : 160, fg), Math.Max(1.4f, 1.4f * scale)))
+            {
+                int cx = r.Left + r.Width / 2, cy = r.Top + r.Height / 2, d = S(4);
+                if (left)
+                {
+                    g.DrawLine(p, cx + d / 2, cy - d, cx - d / 2, cy);
+                    g.DrawLine(p, cx - d / 2, cy, cx + d / 2, cy + d);
+                }
+                else
+                {
+                    g.DrawLine(p, cx - d / 2, cy - d, cx + d / 2, cy);
+                    g.DrawLine(p, cx + d / 2, cy, cx - d / 2, cy + d);
+                }
+            }
+        }
+
+        int hoverArrow;
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            int arrow = prev.Contains(e.Location) ? 1 : (next.Contains(e.Location) ? 2 : 0);
+            int day = 0;
+            var d = FirstCell();
+            for (int r = 0; r < ROWS && day == 0; r++)
+                for (int c = 0; c < COLS; c++, d = d.AddDays(1))
+                    if (CellAt(c, r).Contains(e.Location)) { day = DayKey(d); break; }
+            if (arrow != hoverArrow || day != hoverDay) { hoverArrow = arrow; hoverDay = day; Invalidate(); }
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            if (prev.Contains(e.Location)) { month = month.AddMonths(-1); Invalidate(); }
+            else if (next.Contains(e.Location)) { month = month.AddMonths(1); Invalidate(); }
+        }
+
+        protected override void OnMouseWheel(MouseEventArgs e)
+        {
+            base.OnMouseWheel(e);
+            month = month.AddMonths(e.Delta > 0 ? -1 : 1);
+            Invalidate();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) { dayFont.Dispose(); weekFont.Dispose(); headFont.Dispose(); titleFont.Dispose(); }
             base.Dispose(disposing);
         }
     }
@@ -2457,6 +2900,18 @@ namespace MultiTaskbar
         [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern bool QueryFullProcessImageName(IntPtr h, int flags, StringBuilder sb, ref int size);
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern int GetApplicationUserModelId(IntPtr h, ref uint len, StringBuilder sb);
+        [StructLayout(LayoutKind.Sequential)]
+        public struct DWM_THUMBNAIL_PROPERTIES
+        {
+            public int dwFlags;
+            public RECT rcDestination, rcSource;
+            public byte opacity;
+            [MarshalAs(UnmanagedType.Bool)] public bool fVisible, fSourceClientAreaOnly;
+        }
+
+        [DllImport("dwmapi.dll")] public static extern int DwmRegisterThumbnail(IntPtr dest, IntPtr src, out IntPtr thumb);
+        [DllImport("dwmapi.dll")] public static extern int DwmUnregisterThumbnail(IntPtr thumb);
+        [DllImport("dwmapi.dll")] public static extern int DwmUpdateThumbnailProperties(IntPtr thumb, ref DWM_THUMBNAIL_PROPERTIES props);
         [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out int val, int size);
         [DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr h, int attr, ref int val, int size);
         [DllImport("gdi32.dll")] public static extern bool DeleteObject(IntPtr h);
