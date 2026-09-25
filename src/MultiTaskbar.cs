@@ -27,7 +27,7 @@ namespace MultiTaskbar
 {
     static class Program
     {
-        public const string Version = "1.4.0";
+        public const string Version = "1.4.1";
         public const string Repo = "Creahive/MultiTaskbar";
 
         public static BarManager Manager;
@@ -751,6 +751,7 @@ namespace MultiTaskbar
         int BTN = BTN_96, LABEL_MAX = LABEL_MAX_96, LABEL_MIN = LABEL_MIN_96;
         public bool AllowClose;
         List<Item> items = new List<Item>();
+        readonly List<IntPtr> order = new List<IntPtr>();   // windows in the order they turned up
         Item hover, pressed;
         string lastSig = "";
         IntPtr lastFg;
@@ -862,7 +863,7 @@ namespace MultiTaskbar
 
             Pins.RefreshIfChanged();
             Volume.Poll();
-            var wins = WindowScanner.WindowsOn(hmon);
+            var wins = InOrder(WindowScanner.WindowsOn(hmon));
             bool labels = TaskbarPrefs.ShowLabels;
             string sig = string.Join(",", wins.Select(w => w.ToInt64() + (labels ? ":" + WindowScanner.Title(w) : "")).ToArray())
                 + "|" + fg + "|" + Pins.Version + "|" + DateTime.Now.ToString("t d") + "|" + labels
@@ -873,6 +874,17 @@ namespace MultiTaskbar
                 Relayout(wins);
                 Invalidate();
             }
+        }
+
+        // Windows hands its windows back in z-order, so the one you just switched to comes first.
+        // A button that moves the moment it is clicked is no use, so each window keeps the place it
+        // had when it first appeared on this monitor, the way the real taskbar does it.
+        List<IntPtr> InOrder(List<IntPtr> wins)
+        {
+            order.RemoveAll(h => !wins.Contains(h));
+            foreach (var w in wins)
+                if (!order.Contains(w)) order.Add(w);
+            return new List<IntPtr>(order);
         }
 
         void Relayout(List<IntPtr> wins)
