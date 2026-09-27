@@ -27,7 +27,7 @@ namespace MultiTaskbar
 {
     static class Program
     {
-        public const string Version = "1.4.1";
+        public const string Version = "1.4.2";
         public const string Repo = "Creahive/MultiTaskbar";
 
         public static BarManager Manager;
@@ -2925,6 +2925,7 @@ namespace MultiTaskbar
         [DllImport("dwmapi.dll")] public static extern int DwmUnregisterThumbnail(IntPtr thumb);
         [DllImport("dwmapi.dll")] public static extern int DwmUpdateThumbnailProperties(IntPtr thumb, ref DWM_THUMBNAIL_PROPERTIES props);
         [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out int val, int size);
+        [DllImport("dwmapi.dll", EntryPoint = "DwmGetWindowAttribute")] static extern int DwmGetWindowRect(IntPtr h, int attr, out RECT val, int size);
         [DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr h, int attr, ref int val, int size);
         [DllImport("gdi32.dll")] public static extern bool DeleteObject(IntPtr h);
         [DllImport("gdi32.dll")] public static extern int GetObject(IntPtr h, int size, ref DIBSECTION ds);
@@ -2962,12 +2963,24 @@ namespace MultiTaskbar
             string cls = ClassName(fg);
             if (cls == "Progman" || cls == "WorkerW" || cls == "Shell_TrayWnd" || cls == "Shell_SecondaryTrayWnd") return false;
             if (MonitorFromWindow(fg, 2) != hmon) return false;
-            // A maximized window is not full screen, however far its frame reaches. Treating it as
-            // one would make the bar disappear whenever a window is maximized on that monitor.
-            if (IsZoomed(fg)) return false;
+            // What counts is the frame the user sees. GetWindowRect includes the invisible resize
+            // border, which makes a merely maximized window look like it covers the screen, while
+            // a window that goes full screen from a maximized state (a video player, say) still
+            // reports itself as maximized. The frame the compositor draws tells the two apart.
             RECT r;
-            if (!GetWindowRect(fg, out r)) return false;
+            if (!VisibleBounds(fg, out r)) return false;
             return r.Left <= b.Left && r.Top <= b.Top && r.Right >= b.Right && r.Bottom >= b.Bottom;
+        }
+
+        static bool VisibleBounds(IntPtr h, out RECT r)
+        {
+            try
+            {
+                if (DwmGetWindowRect(h, 9 /*DWMWA_EXTENDED_FRAME_BOUNDS*/, out r, Marshal.SizeOf(typeof(RECT))) == 0)
+                    return true;
+            }
+            catch { }
+            return GetWindowRect(h, out r);
         }
 
         public static int DpiForMonitor(IntPtr hmon)
