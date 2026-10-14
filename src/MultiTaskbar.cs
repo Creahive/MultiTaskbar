@@ -20,6 +20,9 @@ using Microsoft.Win32;
 
 [assembly: AssemblyTitle("MultiTaskbar")]
 [assembly: AssemblyProduct("MultiTaskbar")]
+[assembly: AssemblyDescription("A full taskbar on every monitor for Windows 11")]
+[assembly: AssemblyCompany("Creahive")]
+[assembly: AssemblyCopyright("Copyright (c) 2026 Creahive")]
 [assembly: AssemblyVersion(MultiTaskbar.Program.Version)]
 [assembly: AssemblyFileVersion(MultiTaskbar.Program.Version)]
 

@@ -8,15 +8,38 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   build:
     runs-on: windows-latest
+    env:
+      # Releases are signed through SignPath once the repository variable SIGNPATH_ORGANIZATION_ID
+      # and the secret SIGNPATH_API_TOKEN are set; until then they ship unsigned, as before.
+      SIGN: ${{ startsWith(github.ref, 'refs/tags/v') && vars.SIGNPATH_ORGANIZATION_ID != '' }}
     steps:
       - uses: actions/checkout@v4
       - name: Build
         shell: cmd
         run: build.cmd
+      - name: Upload unsigned exe
+        id: unsigned
+        if: env.SIGN == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: MultiTaskbar-unsigned
+          path: bin/MultiTaskbar.exe
+      - name: Sign
+        if: env.SIGN == 'true'
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: MultiTaskbar
+          signing-policy-slug: release-signing
+          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: bin
       - name: Checksum
         shell: pwsh
         run: |

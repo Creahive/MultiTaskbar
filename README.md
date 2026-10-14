@@ -51,6 +51,18 @@ scripted deployments.
 Windows SmartScreen may warn about the download because the exe is not code-signed. Choose
 **More info → Run anyway**, or build it yourself (below).
 
+### Code signing policy
+
+Release builds are being set up for free code signing provided by [SignPath.io](https://about.signpath.io),
+certificate by [SignPath Foundation](https://signpath.org). Only `MultiTaskbar.exe` as built from this
+repository by GitHub Actions is signed; nothing is signed from a local build.
+
+- Committers and reviewers: [members of Creahive](https://github.com/orgs/Creahive/people)
+- Approvers: [Alex Burak Dogan](https://github.com/alexburakdogan), who approves every signing request by hand
+
+Privacy: MultiTaskbar does not send information to any networked system except the daily update
+check described above, which can be turned off.
+
 ## Use
 
 | Action | Result |
