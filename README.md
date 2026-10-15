@@ -113,10 +113,10 @@ MultiTaskbar follows it within a few seconds.
 
 ## Uninstall
 
-Pick **Uninstall MultiTaskbar** from the tray menu, or find MultiTaskbar in **Settings > Apps >
-Installed apps**, or run `MultiTaskbar.exe --uninstall`. It brings the Windows taskbars back,
-removes the startup entry, its settings and its log, and deletes the exe. Installed through winget
-instead? Then `winget uninstall MultiTaskbar` does it.
+Pick **Uninstall MultiTaskbar** from the tray menu, or run `MultiTaskbar.exe --uninstall`. It
+brings the Windows taskbars back, removes the startup entry, its settings and its log, and opens
+the folder so you can delete the exe. Installed through winget instead? Then
+`winget uninstall MultiTaskbar` does all of it.
 
 ## Known limits
 

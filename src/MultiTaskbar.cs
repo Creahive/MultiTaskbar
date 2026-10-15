@@ -30,7 +30,7 @@ namespace MultiTaskbar
 {
     static class Program
     {
-        public const string Version = "1.4.2";
+        public const string Version = "1.4.3";
         public const string Repo = "Creahive/MultiTaskbar";
 
         public static BarManager Manager;
@@ -497,31 +497,8 @@ namespace MultiTaskbar
 
     static class Uninstall
     {
+        // Older versions listed themselves in Settings > Apps; the entry is still removed here.
         const string ArpKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\MultiTaskbar";
-
-        // Listing the app in Settings > Apps is for copies the user placed themselves; when winget
-        // installed it, winget keeps its own entry and owns the removal.
-        public static void Register()
-        {
-            try
-            {
-                if (Application.ExecutablePath.IndexOf(@"\WinGet\Packages\", StringComparison.OrdinalIgnoreCase) >= 0) return;
-                using (var k = Registry.CurrentUser.CreateSubKey(ArpKey))
-                {
-                    k.SetValue("DisplayName", "MultiTaskbar");
-                    k.SetValue("DisplayVersion", Program.Version);
-                    k.SetValue("Publisher", "Creahive");
-                    k.SetValue("DisplayIcon", Application.ExecutablePath);
-                    k.SetValue("InstallLocation", Path.GetDirectoryName(Application.ExecutablePath));
-                    k.SetValue("URLInfoAbout", "https://github.com/" + Program.Repo);
-                    k.SetValue("UninstallString", "\"" + Application.ExecutablePath + "\" --uninstall");
-                    k.SetValue("NoModify", 1);
-                    k.SetValue("NoRepair", 1);
-                    try { k.SetValue("EstimatedSize", (int)(new FileInfo(Application.ExecutablePath).Length / 1024)); } catch { }
-                }
-            }
-            catch (Exception ex) { Program.Log(ex); }
-        }
 
         // Started from the running app, so the removal happens in a process of its own.
         public static void Launch()
@@ -534,8 +511,8 @@ namespace MultiTaskbar
         {
             if (MessageBox.Show(
                     "Remove MultiTaskbar?\n\n" +
-                    "The Windows taskbars come back on every monitor, the startup entry and settings are " +
-                    "removed, and the program deletes itself.",
+                    "The Windows taskbars come back on every monitor, and the startup entry and settings are " +
+                    "removed.",
                     "Uninstall MultiTaskbar", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
                 return;
 
@@ -551,14 +528,17 @@ namespace MultiTaskbar
             try { Registry.CurrentUser.DeleteSubKeyTree(ArpKey, false); } catch (Exception ex) { Program.Log(ex); }
             try { Directory.Delete(Path.GetDirectoryName(Program.LogPath), true); } catch { }
 
-            // A running exe cannot delete itself, so a short shell command does it once this exits.
+            // The exe is left for the user to delete, or for winget when it installed it.
             string exe = Application.ExecutablePath;
-            try
+            if (exe.IndexOf(@"\WinGet\Packages\", StringComparison.OrdinalIgnoreCase) >= 0)
             {
-                Process.Start(new ProcessStartInfo("cmd.exe",
-                    "/c ping -n 3 127.0.0.1 > nul & del /f /q \"" + exe + "\" & rmdir \"" + Path.GetDirectoryName(exe) + "\"")
-                { UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden });
+                MessageBox.Show("MultiTaskbar is removed. Run  winget uninstall MultiTaskbar  to delete the program files too.",
+                    "Uninstall MultiTaskbar", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
             }
+            MessageBox.Show("MultiTaskbar is removed. Its folder opens next, so you can delete MultiTaskbar.exe.",
+                "Uninstall MultiTaskbar", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            try { Process.Start(new ProcessStartInfo("explorer.exe", "/select,\"" + exe + "\"") { UseShellExecute = true }); }
             catch (Exception ex) { Program.Log(ex); }
         }
     }
@@ -654,7 +634,6 @@ namespace MultiTaskbar
             tray = new Tray(this);
 
             Autostart.FixPath();
-            Uninstall.Register();
             var ask = new Timer { Interval = 1000 };
             ask.Tick += delegate { ask.Stop(); ask.Dispose(); Autostart.AskOnFirstRun(); };
             ask.Start();
