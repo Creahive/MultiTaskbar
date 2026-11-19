@@ -711,7 +711,7 @@ namespace MultiTaskbar
 
     class Item
     {
-        public string Kind; // start, pin, win, volume, clock, desktop
+        public string Kind; // start, search, taskview, widgets, pin, win, volume, clock, desktop
         public Rectangle Rect;
         public Bitmap Icon;
         public Pins.Pin Pin;
@@ -848,8 +848,8 @@ namespace MultiTaskbar
             var wins = InOrder(WindowScanner.WindowsOn(hmon));
             bool labels = TaskbarPrefs.ShowLabels;
             string sig = string.Join(",", wins.Select(w => w.ToInt64() + (labels ? ":" + WindowScanner.Title(w) : "")).ToArray())
-                + "|" + fg + "|" + Pins.Version + "|" + DateTime.Now.ToString("t d") + "|" + labels
-                + "|" + Volume.Signature + "|" + Theme.Light + Theme.Accent.ToArgb();
+                + "|" + fg + "|" + Pins.Version + "|" + DateTime.Now.ToString("t d") + "|" + TaskbarPrefs.Signature
+                + "|" + Status.Signature + "|" + Volume.Signature + "|" + Theme.Light + Theme.Accent.ToArgb();
             if (sig != lastSig)
             {
                 lastSig = sig;
@@ -877,11 +877,24 @@ namespace MultiTaskbar
             var desk = new Item { Kind = "desktop", Rect = new Rectangle(W - Scale(12), 0, Scale(12), H) };
             var clock = new Item { Kind = "clock", Rect = new Rectangle(desk.Rect.Left - Scale(92), 0, Scale(88), H) };
             var vol = new Item { Kind = "volume", Rect = new Rectangle(clock.Rect.Left - Scale(42), 0, Scale(40), H) };
-            int limit = vol.Rect.Left - Scale(8);
+            int sw0 = Scale(Status.HasBattery ? 64 : 40);
+            var status = new Item { Kind = "status", Rect = new Rectangle(vol.Rect.Left - sw0 - Scale(2), 0, sw0, H) };
+            int limit = status.Rect.Left - Scale(8);
 
             int x = Scale(6);
             list.Add(new Item { Kind = "start", Rect = new Rectangle(x, 0, BTN, H) });
             x += BTN;
+
+            int mode = TaskbarPrefs.SearchMode;
+            if (mode != 0)
+            {
+                bool box = mode == 2 || mode == 3;
+                int sw = box ? Math.Min(Scale(mode == 2 ? 190 : 110), Math.Max(BTN, (limit - x) / 4)) : BTN;
+                list.Add(new Item { Kind = "search", Label = box && sw > BTN ? "Search" : null, Rect = new Rectangle(x, 0, sw, H) });
+                x += sw;
+            }
+            if (TaskbarPrefs.ShowTaskView) { list.Add(new Item { Kind = "taskview", Rect = new Rectangle(x, 0, BTN, H) }); x += BTN; }
+            if (TaskbarPrefs.ShowWidgets) { list.Add(new Item { Kind = "widgets", Rect = new Rectangle(x, 0, BTN, H) }); x += BTN; }
 
             if (TaskbarPrefs.ShowLabels)
             {
@@ -899,7 +912,7 @@ namespace MultiTaskbar
                         list.Add(it);
                         x += iw;
                     }
-                    FinishLayout(list, vol, clock, desk);
+                    FinishLayout(list, status, vol, clock, desk);
                     return;
                 }
                 // Too many windows to label: fall back to combined icons, like Windows does.
@@ -944,11 +957,23 @@ namespace MultiTaskbar
                 x += BTN;
             }
 
-            FinishLayout(list, vol, clock, desk);
+            FinishLayout(list, status, vol, clock, desk);
         }
 
-        void FinishLayout(List<Item> list, Item vol, Item clock, Item desk)
+        void FinishLayout(List<Item> list, Item status, Item vol, Item clock, Item desk)
         {
+            // Windows 11 centers Start, pins and windows as one group across the whole taskbar.
+            // Keep the group clear of the tray area on the right and the edge on the left.
+            if (TaskbarPrefs.Centered && list.Count > 0)
+            {
+                int left = list[0].Rect.Left, right = list[list.Count - 1].Rect.Right;
+                int shift = (ClientSize.Width - (right - left)) / 2 - left;
+                shift = Math.Min(shift, status.Rect.Left - Scale(8) - right);
+                if (shift > 0)
+                    foreach (var it in list) it.Rect = new Rectangle(it.Rect.X + shift, it.Rect.Y, it.Rect.Width, it.Rect.Height);
+            }
+
+            list.Add(status);
             list.Add(vol);
             list.Add(clock);
             list.Add(desk);
@@ -1030,8 +1055,12 @@ namespace MultiTaskbar
                 switch (it.Kind)
                 {
                     case "start": DrawStart(g, r); break;
+                    case "search": DrawSearch(g, it, r, fgc); break;
+                    case "taskview": DrawCentered(g, "", glyphFont, fgc, r); break;
+                    case "widgets": DrawWidgets(g, r, fgc); break;
                     case "pin":
                     case "win": DrawApp(g, it, r, active, fgc); break;
+                    case "status": DrawStatus(g, r, fgc); break;
                     case "volume": DrawCentered(g, Glyphs.ForVolume(), glyphFont, fgc, r); break;
                     case "clock": DrawClock(g, r, fgc); break;
                     case "desktop":
@@ -1054,6 +1083,34 @@ namespace MultiTaskbar
                 g.FillRectangle(b, x0, y0 + s + gap, s, s);
                 g.FillRectangle(b, x0 + s + gap, y0 + s + gap, s, s);
             }
+        }
+
+        void DrawSearch(Graphics g, Item it, Rectangle r, Color fgc)
+        {
+            if (it.Label == null) { DrawCentered(g, "", glyphFont, fgc, r); return; }
+            var gr = new Rectangle(r.Left + Scale(4), r.Top, Scale(28), r.Height);
+            DrawCentered(g, "", glyphFont, fgc, gr);
+            var tr = new Rectangle(gr.Right, r.Top, r.Right - gr.Right - Scale(6), r.Height);
+            TextRenderer.DrawText(g, it.Label, labelFont, tr, Color.FromArgb(170, fgc),
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);
+        }
+
+        void DrawStatus(Graphics g, Rectangle r, Color fgc)
+        {
+            if (Status.BatGlyph == null) { DrawCentered(g, Status.NetGlyph, glyphFont, fgc, r); return; }
+            int half = r.Width / 2;
+            DrawCentered(g, Status.NetGlyph, glyphFont, fgc, new Rectangle(r.Left, r.Top, half, r.Height));
+            DrawCentered(g, Status.BatGlyph, glyphFont, fgc, new Rectangle(r.Left + half, r.Top, r.Width - half, r.Height));
+        }
+
+        void DrawWidgets(Graphics g, Rectangle r, Color fgc)
+        {
+            int s = Scale(8), gap = Scale(3);
+            int x0 = r.Left + (r.Width - (s * 2 + gap)) / 2, y0 = r.Top + (r.Height - (s * 2 + gap)) / 2;
+            using (var b = new SolidBrush(Color.FromArgb(200, fgc)))
+                for (int i = 0; i < 4; i++)
+                    using (var path = RoundRect(new Rectangle(x0 + (i % 2) * (s + gap), y0 + (i / 2) * (s + gap), s, s), Scale(2)))
+                        g.FillPath(b, path);
         }
 
         void DrawApp(Graphics g, Item it, Rectangle r, bool active, Color fgc)
@@ -1223,6 +1280,10 @@ namespace MultiTaskbar
             switch (it.Kind)
             {
                 case "start": return "Start";
+                case "status": return Status.Text;
+                case "search": return "Search";
+                case "taskview": return "Task View";
+                case "widgets": return "Widgets";
                 case "desktop": return "Show desktop";
                 case "clock": return DateTime.Now.ToString("D") + "\n" + DateTime.Now.ToString("T");
                 case "volume":
@@ -1248,6 +1309,12 @@ namespace MultiTaskbar
                     Native.keybd_event(0x5B, 0, 0, UIntPtr.Zero);
                     Native.keybd_event(0x5B, 0, 2, UIntPtr.Zero);
                     return;
+                case "status":
+                    if (e.Button == MouseButtons.Right) { Launch("ms-settings:network", null); return; }
+                    WinKey(0x41); return;                // Win+A
+                case "search": WinKey(0x53); return;     // Win+S
+                case "taskview": WinKey(0x09); return;   // Win+Tab
+                case "widgets": WinKey(0x57); return;    // Win+W
                 case "desktop":
                     Shell.ToggleDesktop();
                     return;
@@ -1271,6 +1338,14 @@ namespace MultiTaskbar
                     ToggleOrCycle(it.Windows);
                     return;
             }
+        }
+
+        static void WinKey(byte key)
+        {
+            Native.keybd_event(0x5B, 0, 0, UIntPtr.Zero);
+            Native.keybd_event(key, 0, 0, UIntPtr.Zero);
+            Native.keybd_event(key, 0, 2, UIntPtr.Zero);
+            Native.keybd_event(0x5B, 0, 2, UIntPtr.Zero);
         }
 
         static void ToggleOrCycle(List<IntPtr> wins)
@@ -2648,30 +2723,119 @@ namespace MultiTaskbar
 
     // Mirrors Windows' "Combine taskbar buttons and hide labels" setting for other taskbars:
     // 0 = always combine (icons only), 1 = when taskbar is full, 2 = never (labels).
+    // Also mirrors "Taskbar alignment" (TaskbarAl: 0 = left, 1 = center) on Windows 11.
     static class TaskbarPrefs
     {
+        const string Adv = @"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced";
         static DateTime last = DateTime.MinValue;
-        static bool labels;
+        static bool labels, centered, taskView, widgets;
+        static int search;
+        static bool win11Checked, win11;
 
-        public static bool ShowLabels
+        public static bool ShowLabels { get { Refresh(); return labels; } }
+        public static bool Centered { get { Refresh(); return centered; } }
+        public static bool ShowTaskView { get { Refresh(); return taskView; } }
+        public static bool ShowWidgets { get { Refresh(); return widgets; } }
+        // 0 = hidden, 1 = icon, 2 = search box, 3 = icon and label
+        public static int SearchMode { get { Refresh(); return search; } }
+        public static string Signature { get { Refresh(); return labels + "" + centered + taskView + widgets + search; } }
+
+        static int Read(RegistryKey k, string name, int fallback)
         {
-            get
+            object v = k == null ? null : k.GetValue(name);
+            return v is int ? (int)v : fallback;
+        }
+
+        static void Refresh()
+        {
+            if ((DateTime.Now - last).TotalSeconds < 2) return;
+            last = DateTime.Now;
+            bool w11 = IsWindows11();
+            try
             {
-                if ((DateTime.Now - last).TotalSeconds >= 2)
+                using (var k = Registry.CurrentUser.OpenSubKey(Adv))
                 {
-                    last = DateTime.Now;
-                    try
-                    {
-                        using (var k = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"))
-                        {
-                            object v = k == null ? null : (k.GetValue("MMTaskbarGlomLevel") ?? k.GetValue("TaskbarGlomLevel"));
-                            labels = v is int && (int)v != 0;
-                        }
-                    }
-                    catch { }
+                    object v = k == null ? null : (k.GetValue("MMTaskbarGlomLevel") ?? k.GetValue("TaskbarGlomLevel"));
+                    labels = v is int && (int)v != 0;
+                    // Windows 11 centers by default when the value was never written; Windows 10 has no such setting.
+                    centered = Read(k, "TaskbarAl", w11 ? 1 : 0) != 0;
+                    taskView = Read(k, "ShowTaskViewButton", 1) != 0;
+                    widgets = w11 && Read(k, "TaskbarDa", 1) != 0;
                 }
-                return labels;
+                using (var k = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Search"))
+                    search = Read(k, "SearchboxTaskbarMode", w11 ? 1 : 2);
             }
+            catch { }
+        }
+
+        static bool IsWindows11()
+        {
+            if (!win11Checked)
+            {
+                win11Checked = true;
+                try
+                {
+                    using (var k = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion"))
+                    {
+                        int build;
+                        win11 = k != null && int.TryParse(Convert.ToString(k.GetValue("CurrentBuildNumber")), out build) && build >= 22000;
+                    }
+                }
+                catch { }
+            }
+            return win11;
+        }
+    }
+
+    // Network and battery state for the status button next to the volume icon.
+    static class Status
+    {
+        static DateTime last = DateTime.MinValue;
+        static string net = "", bat;
+        static string text = "";
+
+        public static bool HasBattery { get { Poll(); return bat != null; } }
+        public static string NetGlyph { get { Poll(); return net; } }
+        public static string BatGlyph { get { Poll(); return bat; } }
+        public static string Text { get { Poll(); return text; } }
+        public static string Signature { get { Poll(); return net + "|" + bat + "|" + text; } }
+
+        static void Poll()
+        {
+            if ((DateTime.Now - last).TotalSeconds < 5) return;
+            last = DateTime.Now;
+            try
+            {
+                net = ""; text = "No internet connection";
+                foreach (var n in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces())
+                {
+                    if (n.OperationalStatus != System.Net.NetworkInformation.OperationalStatus.Up) continue;
+                    var t = n.NetworkInterfaceType;
+                    if (t == System.Net.NetworkInformation.NetworkInterfaceType.Loopback
+                        || t == System.Net.NetworkInformation.NetworkInterfaceType.Tunnel) continue;
+                    bool hasGateway = n.GetIPProperties().GatewayAddresses.Count > 0;
+                    if (!hasGateway) continue;
+                    bool wifi = t == System.Net.NetworkInformation.NetworkInterfaceType.Wireless80211;
+                    net = wifi ? "" : "";
+                    text = (wifi ? "Wi-Fi: " : "Network: ") + n.Name;
+                    if (!wifi) break;
+                }
+            }
+            catch { }
+            try
+            {
+                var ps = SystemInformation.PowerStatus;
+                if ((ps.BatteryChargeStatus & BatteryChargeStatus.NoSystemBattery) != 0 || ps.BatteryLifePercent > 1f) bat = null;
+                else
+                {
+                    int pct = (int)Math.Round(ps.BatteryLifePercent * 100);
+                    bool charging = ps.PowerLineStatus == PowerLineStatus.Online;
+                    bat = charging ? ((char)(0xE85A + Math.Min(8, pct / 11))).ToString()
+                        : (pct >= 95 ? "" : ((char)(0xE850 + Math.Min(9, pct / 10))).ToString());
+                    text += "\nBattery: " + pct + "%" + (charging ? " (charging)" : "");
+                }
+            }
+            catch { bat = null; }
         }
     }
 

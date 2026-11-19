@@ -17,6 +17,8 @@ secondary taskbars with a complete one:
   Explorer's own entries, including *Run as administrator*, *Properties* and *Unpin from taskbar*
 - **Live window previews** on hover, drawn by the desktop compositor, as on the real taskbar
 - **Volume**: click for a slider, scroll to change, middle-click to mute
+- **Follows your taskbar settings**: centered or left-aligned, and the Search, Task View and Widgets buttons, as you set them in Windows
+- **Network and battery** status next to the volume icon
 - **Clock and date** with a **calendar** when you click them, and **Show desktop** in the corner
 - Light and dark theme and your accent color, picked up from Windows
 - Hides itself when an app goes full screen
