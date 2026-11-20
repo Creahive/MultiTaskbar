@@ -30,7 +30,7 @@ namespace MultiTaskbar
 {
     static class Program
     {
-        public const string Version = "1.4.3";
+        public const string Version = "1.5.0";
         public const string Repo = "Creahive/MultiTaskbar";
 
         public static BarManager Manager;
